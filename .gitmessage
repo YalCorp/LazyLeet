@@ -1,0 +1,16 @@
+type(scope): commit message
+
+# Conventional Commit format:
+# type(scope): short imperative summary
+#
+# Common types:
+# feat     new user-facing feature
+# fix      bug fix
+# docs     documentation-only change
+# test     tests only
+# chore    maintenance, tooling, release setup
+# refactor code restructuring without behavior change
+#
+# Examples:
+# feat(tui): add clickable problem URLs
+# chore(repo): configure release automation
