@@ -6,12 +6,14 @@ import (
 	"sort"
 	"strings"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/YalCorp/LazyLeet/internal/catalog"
 	"github.com/YalCorp/LazyLeet/internal/storage"
+	"github.com/YalCorp/LazyLeet/internal/workspace"
 )
 
 type Pane int
@@ -29,6 +31,7 @@ const (
 	ModeSearch  Mode = "search"
 	ModeCommand Mode = "command"
 	ModeHelp    Mode = "help"
+	ModeEditor  Mode = "editor"
 )
 
 type ProgressStore interface {
@@ -36,10 +39,35 @@ type ProgressStore interface {
 	SetProgress(ctx context.Context, slug string, status storage.Status) error
 }
 
+type SolutionStore interface {
+	ReadSolution(problem catalog.Problem, language workspace.Language) (content string, path string, err error)
+	SaveSolution(problem catalog.Problem, language workspace.Language, content string) (path string, err error)
+}
+
+type StatementStore interface {
+	ReadStatement(problem catalog.Problem) (content string, path string, err error)
+}
+
+type Option func(*Model)
+
+func WithSolutionStore(store SolutionStore) Option {
+	return func(m *Model) {
+		m.solutions = store
+	}
+}
+
+func WithStatementStore(store StatementStore) Option {
+	return func(m *Model) {
+		m.statements = store
+	}
+}
+
 type Model struct {
-	catalog catalog.Catalog
-	store   ProgressStore
-	openURL URLOpener
+	catalog    catalog.Catalog
+	store      ProgressStore
+	solutions  SolutionStore
+	statements StatementStore
+	openURL    URLOpener
 
 	width  int
 	height int
@@ -48,29 +76,41 @@ type Model struct {
 	trackIndex int
 	problemIdx int
 
-	mode         Mode
-	search       textinput.Model
-	commandIndex int
-	statusLine   string
+	mode          Mode
+	search        textinput.Model
+	editor        textarea.Model
+	editorProblem catalog.Problem
+	language      workspace.Language
+	editorPath    string
+	commandIndex  int
+	statusLine    string
 }
 
 var commands = []string{
 	"Go to Track",
 	"Search Problem",
+	"Edit Solution",
+	"Change Language",
 	"Mark Solved",
 	"Open Official URL",
 	"Open Notes",
 	"Show Help",
 }
 
-func NewModel(c catalog.Catalog, store ProgressStore) Model {
+func NewModel(c catalog.Catalog, store ProgressStore, opts ...Option) Model {
 	search := textinput.New()
 	search.Prompt = "/ "
 	search.SetWidth(36)
-	return Model{
+	editor := textarea.New()
+	editor.Placeholder = "Write your solution here..."
+	editor.Prompt = ""
+	editor.ShowLineNumbers = true
+	model := Model{
 		catalog:    c,
 		store:      store,
 		openURL:    openURLCommand,
+		editor:     editor,
+		language:   workspace.DefaultLanguage(),
 		width:      110,
 		height:     32,
 		activePane: ProblemsPane,
@@ -78,6 +118,10 @@ func NewModel(c catalog.Catalog, store ProgressStore) Model {
 		search:     search,
 		statusLine: "Ready",
 	}
+	for _, opt := range opts {
+		opt(&model)
+	}
+	return model.resizeEditor()
 }
 
 func (m Model) Init() tea.Cmd {
@@ -89,7 +133,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
+		return m.resizeEditor(), nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case urlOpenedMsg:
@@ -162,6 +206,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.statusLine = "Help closed"
 		}
 		return m, nil
+	case ModeEditor:
+		return m.handleEditorKey(msg)
 	}
 
 	switch key {
@@ -186,6 +232,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusLine = "Help"
 	case "enter":
 		m.statusLine = fmt.Sprintf("Selected %s", m.SelectedProblem().Title)
+	case "e":
+		return m.openSelectedEditor()
+	case "l":
+		m = m.cycleLanguage()
+	case "n":
+		m.statusLine = "Notes editor is planned for a later milestone"
 	case "m":
 		m = m.cycleProgress()
 	case "o":
@@ -214,6 +266,12 @@ func (m Model) handleCommandKey(key string) (tea.Model, tea.Cmd) {
 			m.mode = ModeSearch
 			m.search.Focus()
 			m.statusLine = "Search problems"
+		case "Edit Solution":
+			m.mode = ModeBrowse
+			return m.openSelectedEditor()
+		case "Change Language":
+			m = m.cycleLanguage()
+			m.mode = ModeBrowse
 		case "Mark Solved":
 			m = m.setSelectedProgress(storage.StatusSolved)
 			m.mode = ModeBrowse
@@ -229,6 +287,68 @@ func (m Model) handleCommandKey(key string) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editor.Blur()
+		m.mode = ModeBrowse
+		m.statusLine = "Editor closed"
+		return m, nil
+	case "ctrl+s":
+		m = m.saveEditor()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.editor, cmd = m.editor.Update(msg)
+	return m, cmd
+}
+
+func (m Model) openSelectedEditor() (tea.Model, tea.Cmd) {
+	problem := m.SelectedProblem()
+	if problem.Slug == "" {
+		m.statusLine = "No problem selected"
+		return m, nil
+	}
+	if m.solutions == nil {
+		m.statusLine = "Solution workspace unavailable"
+		return m, nil
+	}
+	content, path, err := m.solutions.ReadSolution(problem, m.language)
+	if err != nil {
+		m.statusLine = "Editor error: " + err.Error()
+		return m, nil
+	}
+	m.editorProblem = problem
+	m.editorPath = path
+	m.editor.SetValue(content)
+	m.mode = ModeEditor
+	m.statusLine = "Editing " + path
+	m = m.resizeEditor()
+	cmd := m.editor.Focus()
+	return m, cmd
+}
+
+func (m Model) saveEditor() Model {
+	if m.solutions == nil || m.editorProblem.Slug == "" {
+		m.statusLine = "No solution file open"
+		return m
+	}
+	path, err := m.solutions.SaveSolution(m.editorProblem, m.language, m.editor.Value())
+	if err != nil {
+		m.statusLine = "Save error: " + err.Error()
+		return m
+	}
+	m.editorPath = path
+	m.statusLine = "Saved " + path
+	return m
+}
+
+func (m Model) cycleLanguage() Model {
+	m.language = workspace.NextLanguage(m.language)
+	m.statusLine = "Language: " + m.language.Title
+	return m
 }
 
 func (m Model) openSelectedURL() (tea.Model, tea.Cmd) {
@@ -342,6 +462,9 @@ func (m Model) selectedStatus(problem catalog.Problem) storage.Status {
 }
 
 func (m Model) render() string {
+	if m.mode == ModeEditor {
+		return m.renderEditor()
+	}
 	width := max(m.width, 96)
 	height := max(m.height, 24)
 	trackW := max(24, width/5)
@@ -415,8 +538,13 @@ func (m Model) renderDetails(width, height int) string {
 		fmt.Sprintf("ID: %d", problem.ID),
 		fmt.Sprintf("Difficulty: %s", difficulty(problem.Difficulty)),
 		fmt.Sprintf("Status: %s", statusBadge(m.selectedStatus(problem))),
+		fmt.Sprintf("Language: %s", m.language.Title),
 		"URL: "+urlStyle.Hyperlink(problem.URL).Render(problem.URL),
 		urlHintStyle.Render("Use ctrl + click to open in browser"),
+		"",
+	)
+	lines = append(lines, m.renderStatementPreview(problem, width, height, len(lines))...)
+	lines = append(lines,
 		"",
 		"Patterns:",
 	)
@@ -432,8 +560,24 @@ func (m Model) renderDetails(width, height int) string {
 	return panelStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 }
 
+func (m Model) renderStatementPreview(problem catalog.Problem, width, height, used int) []string {
+	if m.statements == nil {
+		return []string{"Statement:", "  " + mutedStyle.Render("Local statement workspace unavailable.")}
+	}
+	content, path, err := m.statements.ReadStatement(problem)
+	if err != nil {
+		return []string{"Statement:", "  " + mutedStyle.Render("Could not read statement: "+err.Error())}
+	}
+	available := max(3, height-used-11)
+	out := []string{"Statement:", "  " + mutedStyle.Render(path)}
+	for _, line := range previewLines(content, max(12, width-6), available) {
+		out = append(out, "  "+line)
+	}
+	return out
+}
+
 func (m Model) renderBottom(width int) string {
-	left := "j/k move  tab pane  / search  ctrl+p commands  m mark  o open URL  ? help  q quit"
+	left := "j/k move  tab pane  / search  ctrl+p commands  e edit  l lang  m mark  o open URL  ? help  q quit"
 	if m.mode == ModeSearch {
 		left = m.search.View()
 	}
@@ -460,12 +604,37 @@ func (m Model) renderHelp(width int) string {
 		"/               search problems",
 		"ctrl+p          command palette",
 		"enter           select current item",
+		"e               edit local solution",
+		"l               cycle language",
+		"ctrl+s          save while editing",
 		"m               cycle progress status",
 		"o               open official URL",
 		"ctrl/cmd-click  open URL link in supported terminals",
 		"q/esc           quit or close overlay",
 	}
 	return overlayStyle.Width(min(64, width-4)).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderEditor() string {
+	width := max(m.width, 80)
+	height := max(m.height, 20)
+	m = m.resizeEditor()
+
+	title := "LazyLeet  " + mutedStyle.Render("editor")
+	if m.editorProblem.Title != "" {
+		title += "  " + m.editorProblem.Title + "  " + mutedStyle.Render(m.language.Title)
+	}
+	header := headerStyle.Width(width).Render(title)
+	path := mutedStyle.Width(width).Render(m.editorPath)
+	body := editorStyle.Width(max(20, width-4)).Height(max(8, height-6)).Render(m.editor.View())
+	bar := footerStyle.Width(width).Render("ctrl+s save  esc browser  ctrl+c quit  |  " + m.statusLine)
+	return lipgloss.JoinVertical(lipgloss.Left, header, path, body, bar)
+}
+
+func (m Model) resizeEditor() Model {
+	m.editor.SetWidth(max(20, m.width-6))
+	m.editor.SetHeight(max(6, m.height-8))
+	return m
 }
 
 func panelTitle(title string, active bool) string {
@@ -533,4 +702,38 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func previewLines(content string, width, limit int) []string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	raw := strings.Split(content, "\n")
+	lines := make([]string, 0, min(len(raw), limit))
+	for _, line := range raw {
+		line = strings.TrimRight(line, " \t")
+		if line == "" && len(lines) == 0 {
+			continue
+		}
+		lines = append(lines, truncateLine(line, width))
+		if len(lines) == limit {
+			break
+		}
+	}
+	if len(raw) > limit {
+		lines = append(lines, mutedStyle.Render("..."))
+	}
+	if len(lines) == 0 {
+		return []string{mutedStyle.Render("No local statement content yet.")}
+	}
+	return lines
+}
+
+func truncateLine(line string, width int) string {
+	runes := []rune(line)
+	if len(runes) <= width {
+		return line
+	}
+	if width <= 3 {
+		return string(runes[:max(0, width)])
+	}
+	return string(runes[:width-3]) + "..."
 }

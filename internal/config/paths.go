@@ -8,9 +8,10 @@ import (
 const AppDirName = ".lazyleet"
 
 type Paths struct {
-	HomeDir string
-	AppDir  string
-	DBPath  string
+	HomeDir      string
+	AppDir       string
+	DBPath       string
+	WorkspaceDir string
 }
 
 func DefaultPaths() (Paths, error) {
@@ -20,12 +21,16 @@ func DefaultPaths() (Paths, error) {
 	}
 	appDir := filepath.Join(home, AppDirName)
 	return Paths{
-		HomeDir: home,
-		AppDir:  appDir,
-		DBPath:  filepath.Join(appDir, "db.sqlite"),
+		HomeDir:      home,
+		AppDir:       appDir,
+		DBPath:       filepath.Join(appDir, "db.sqlite"),
+		WorkspaceDir: filepath.Join(appDir, "workspace"),
 	}, nil
 }
 
 func EnsureAppDir(paths Paths) error {
-	return os.MkdirAll(paths.AppDir, 0o755)
+	if err := os.MkdirAll(paths.AppDir, 0o755); err != nil {
+		return err
+	}
+	return os.MkdirAll(paths.WorkspaceDir, 0o755)
 }

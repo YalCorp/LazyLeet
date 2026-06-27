@@ -9,11 +9,12 @@ import (
 )
 
 type AppConfig struct {
-	DatabasePath string `toml:"database_path"`
+	DatabasePath  string `toml:"database_path"`
+	WorkspacePath string `toml:"workspace_path"`
 }
 
 func Load(paths Paths) (AppConfig, error) {
-	cfg := AppConfig{DatabasePath: paths.DBPath}
+	cfg := AppConfig{DatabasePath: paths.DBPath, WorkspacePath: paths.WorkspaceDir}
 	path := filepath.Join(paths.AppDir, "config.toml")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
@@ -23,6 +24,9 @@ func Load(paths Paths) (AppConfig, error) {
 	}
 	if cfg.DatabasePath == "" {
 		cfg.DatabasePath = paths.DBPath
+	}
+	if cfg.WorkspacePath == "" {
+		cfg.WorkspacePath = paths.WorkspaceDir
 	}
 	return cfg, nil
 }

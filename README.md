@@ -30,7 +30,9 @@ The repository now contains a first runnable Go demo:
 - `lazyleet version` prints build metadata.
 - Blind 75 and NeetCode 150 are bundled as metadata-only tracks.
 - Progress is stored locally in SQLite at `~/.lazyleet/db.sqlite`.
-- Search, pane navigation, a command palette, help, official URLs, and progress marking are available in the TUI.
+- Local Python, Go, and Java solution files are edited in an embedded terminal editor and saved under `~/.lazyleet/workspace`.
+- Local statement previews are read from per-problem `statement.md` files.
+- Search, pane navigation, a command palette, help, official URLs, solution editing, and progress marking are available in the TUI.
 
 Install or run from source:
 
@@ -49,14 +51,14 @@ go build ./cmd/lazyleet
 
 Future MVP work should add:
 
-- Local solution files generated from language templates.
 - Local Markdown notes per problem.
+- Statement editing/import workflows for user-provided problem text.
 - Local test running for supported languages.
 - `$EDITOR` integration for solving in tools like Neovim, Vim, Helix, or Nano.
 
 The MVP does not aim to include:
 
-- A full embedded code editor.
+- A full IDE-grade embedded code editor.
 - Community solutions or public discussion threads.
 - AI-generated explanations by default.
 - Mandatory terminal graphics support.
@@ -73,7 +75,10 @@ Inside the TUI:
 ```text
 /        search problems
 Enter    open selected problem
-e        edit solution in $EDITOR
+e        edit local solution
+l        cycle language
+ctrl+s   save solution while editing
+esc      leave editor
 r        run tests
 n        open notes
 d        view diagrams
@@ -89,11 +94,13 @@ Typical flow:
 2. Pick a track, such as Blind 75 or NeetCode 150.
 3. Select a problem.
 4. Review title, difficulty, tags, URL, and local details.
-5. Press `e` to solve in your editor.
-6. Press `r` to run tests.
-7. Press `n` to edit notes.
-8. Mark progress locally.
-9. Press `o` to open the official LeetCode page when needed.
+5. Add your own local statement text to `statement.md` if you want the prompt visible in LazyLeet.
+6. Press `l` to choose Python, Go, or Java.
+7. Press `e` to solve in the embedded editor.
+8. Press `r` to run tests.
+9. Press `n` to edit notes.
+10. Mark progress locally.
+11. Press `o` to open the official LeetCode page when needed.
 
 ## Problem Metadata
 
@@ -126,12 +133,15 @@ LazyLeet should keep user data local and portable:
     custom.toml
   workspace/
     two-sum/
+      statement.md
       solution.py
+      solution.go
+      Solution.java
       notes.md
       tests.json
 ```
 
-Solutions are normal files, notes are normal Markdown, and progress is stored locally so users can back up or sync their workspace however they prefer.
+Solutions, statements, and notes are normal files, and progress is stored locally so users can back up or sync their workspace however they prefer. LazyLeet does not bundle LeetCode statements; `statement.md` is for user-provided local text.
 
 ## Progress Tracking
 

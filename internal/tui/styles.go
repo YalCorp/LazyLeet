@@ -21,6 +21,10 @@ var (
 			BorderForeground(lipgloss.Color("#A3BE8C")).
 			Padding(0, 1).
 			MarginTop(1)
+	editorStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#88C0D0")).
+			Padding(0, 1)
 	activeTitleStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#88C0D0")).
 				Bold(true)

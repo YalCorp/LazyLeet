@@ -12,6 +12,7 @@ import (
 	"github.com/YalCorp/LazyLeet/internal/storage"
 	"github.com/YalCorp/LazyLeet/internal/tui"
 	"github.com/YalCorp/LazyLeet/internal/version"
+	"github.com/YalCorp/LazyLeet/internal/workspace"
 )
 
 type Runner func(tea.Model) error
@@ -69,7 +70,8 @@ func runTUI(runner Runner) error {
 	if err != nil {
 		return err
 	}
-	return runner(tui.NewModel(c, store))
+	solutions := workspace.New(appConfig.WorkspacePath)
+	return runner(tui.NewModel(c, store, tui.WithSolutionStore(solutions), tui.WithStatementStore(solutions)))
 }
 
 func runProgram(model tea.Model) error {
