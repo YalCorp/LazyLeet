@@ -58,10 +58,17 @@ type StatementStore interface {
 
 type TestCaseStore interface {
 	CountTestCases(problem catalog.Problem) (int, string, error)
+	RunTestCases(problem catalog.Problem, language workspace.Language, solution string) (workspace.TestRunResult, error)
 }
 
 type PaneLayoutStore interface {
 	SavePaneDeltas(deltas [3]int) error
+}
+
+type testRunFinishedMsg struct {
+	problem catalog.Problem
+	result  workspace.TestRunResult
+	err     error
 }
 
 type Option func(*Model)
@@ -199,6 +206,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusLine = "Opened " + msg.url
 		}
 		return m, nil
+	case testRunFinishedMsg:
+		m.statusLine = testRunStatus(msg)
+		return m, nil
 	}
 	return m, nil
 }
@@ -271,11 +281,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "tab":
 		m.activePane = (m.activePane + 1) % 3
-	case "[":
+	case "ctrl+left":
 		m = m.resizeActivePane(-paneResizeStep)
-	case "]":
+	case "ctrl+right":
 		m = m.resizeActivePane(paneResizeStep)
-	case "0":
+	case "ctrl+0":
 		m = m.resetPaneWidths()
 	case "up", "k":
 		m = m.moveOrScrollDetails(-1)
@@ -296,6 +306,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusLine = fmt.Sprintf("Selected %s", m.SelectedProblem().Title)
 	case "e":
 		return m.openSelectedEditor()
+	case "r":
+		return m.runSelectedTests()
 	case "l":
 		m = m.cycleLanguage()
 	case "n":
@@ -362,6 +374,8 @@ func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+s":
 		m = m.saveEditor()
 		return m, nil
+	case "ctrl+r":
+		return m.runEditorTests()
 	case "ctrl+w":
 		m = m.toggleEditorPane()
 		return m, nil
@@ -371,13 +385,13 @@ func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+d":
 		m = m.scrollEditorProblem(editorProblemScrollStep(m))
 		return m, nil
-	case "[":
+	case "ctrl+left":
 		m = m.resizeEditorPane(-paneResizeStep)
 		return m.resizeEditor(), nil
-	case "]":
+	case "ctrl+right":
 		m = m.resizeEditorPane(paneResizeStep)
 		return m.resizeEditor(), nil
-	case "0":
+	case "ctrl+0":
 		m.editorPaneDelta = 0
 		m.statusLine = "Editor panes reset"
 		return m.resizeEditor(), nil
@@ -454,6 +468,67 @@ func (m Model) saveEditor() Model {
 		m.statusLine = "Saved " + path
 	}
 	return m
+}
+
+func (m Model) runSelectedTests() (tea.Model, tea.Cmd) {
+	problem := m.SelectedProblem()
+	if problem.Slug == "" {
+		m.statusLine = "No problem selected"
+		return m, nil
+	}
+	if m.tests == nil {
+		m.statusLine = "Test runner unavailable"
+		return m, nil
+	}
+	if m.solutions == nil {
+		m.statusLine = "Solution workspace unavailable"
+		return m, nil
+	}
+	content, _, err := m.solutions.ReadSolution(problem, m.language)
+	if err != nil {
+		m.statusLine = "Run error: " + err.Error()
+		return m, nil
+	}
+	m.statusLine = "Running tests for " + problem.Title
+	return m, runTestsCmd(m.tests, problem, m.language, content)
+}
+
+func (m Model) runEditorTests() (tea.Model, tea.Cmd) {
+	if m.editorProblem.Slug == "" {
+		m.statusLine = "No solution file open"
+		return m, nil
+	}
+	if m.tests == nil {
+		m.statusLine = "Test runner unavailable"
+		return m, nil
+	}
+	m.statusLine = "Running tests for " + m.editorProblem.Title
+	return m, runTestsCmd(m.tests, m.editorProblem, m.language, m.editor.Value())
+}
+
+func runTestsCmd(store TestCaseStore, problem catalog.Problem, language workspace.Language, solution string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := store.RunTestCases(problem, language, solution)
+		return testRunFinishedMsg{problem: problem, result: result, err: err}
+	}
+}
+
+func testRunStatus(msg testRunFinishedMsg) string {
+	if msg.err != nil {
+		return "Run error: " + msg.err.Error()
+	}
+	if msg.result.Total == 0 {
+		return "No tests ran for " + msg.problem.Title
+	}
+	if msg.result.Passed == msg.result.Total {
+		return fmt.Sprintf("Tests passed: %d/%d", msg.result.Passed, msg.result.Total)
+	}
+	status := fmt.Sprintf("Tests failed: %d/%d", msg.result.Passed, msg.result.Total)
+	if len(msg.result.Failures) > 0 {
+		failure := msg.result.Failures[0]
+		status += fmt.Sprintf(" case %d expected %s got %s", failure.Index, failure.Expected, failure.Actual)
+	}
+	return status
 }
 
 func (m *Model) insertEditorNewline() {
@@ -1020,9 +1095,10 @@ func (m Model) renderBottom(width int) string {
 	left := renderFooterCommands([]footerCommand{
 		{Key: "j/k", Label: "scroll"},
 		{Key: "tab", Label: "pane"},
-		{Key: "[ ]", Label: "resize"},
+		{Key: "^←/^→", Label: "resize"},
 		{Key: "/", Label: "search"},
 		{Key: "e", Label: "edit"},
+		{Key: "r", Label: "run"},
 		{Key: "m", Label: "mark"},
 		{Key: "?", Label: "help"},
 		{Key: "q", Label: "quit"},
@@ -1031,9 +1107,10 @@ func (m Model) renderBottom(width int) string {
 		left = renderFooterCommands([]footerCommand{
 			{Key: "j/k", Label: "scroll"},
 			{Key: "tab", Label: "pane"},
-			{Key: "[ ]", Label: "resize"},
+			{Key: "^←/^→", Label: "resize"},
 			{Key: "/", Label: "search"},
 			{Key: "e", Label: "edit"},
+			{Key: "r", Label: "run"},
 			{Key: "?", Label: "help"},
 			{Key: "q", Label: "quit"},
 		})
@@ -1076,13 +1153,15 @@ func (m Model) renderHelp(width int) string {
 		"j/k, up/down    move selection",
 		"details pane    j/k scroll statement",
 		"tab             cycle panes",
-		"[, ]            shrink or widen active pane",
-		"0               reset pane widths",
+		"ctrl+left/right shrink or widen active pane",
+		"ctrl+0          reset pane widths",
 		"/               search problems",
 		"ctrl+p          command palette",
 		"enter           select current item",
 		"e               edit local solution",
+		"r               run saved solution tests",
 		"ctrl+w          switch editor pane",
+		"ctrl+r          run current editor buffer",
 		"j/k             scroll focused problem pane",
 		"ctrl+u/d        page focused problem pane",
 		"tab             insert indentation while editing",
@@ -1112,7 +1191,7 @@ func (m Model) renderEditor() string {
 	problem := m.renderEditorProblem(problemW, bodyH)
 	solution := m.renderEditorSolution(solutionW, bodyH)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, problem, solution)
-	footer := "ctrl+w pane  j/k problem scroll  [ ] resize  0 reset  ctrl+s save  tab indent  enter auto-indent  esc close  |  " + m.statusLine
+	footer := "ctrl+w pane  j/k problem scroll  ctrl+left/right resize  ctrl+0 reset  ctrl+r run  ctrl+s save  tab indent  enter auto-indent  esc close  |  " + m.statusLine
 	bar := footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(footer, max(1, width-2), ""))
 	return lipgloss.JoinVertical(lipgloss.Left, header, path, body, "", bar)
 }

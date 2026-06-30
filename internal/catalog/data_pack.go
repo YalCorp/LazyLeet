@@ -52,6 +52,14 @@ type dataPackMetadata struct {
 		} `json:"topic_tags"`
 	} `json:"leetcode"`
 	Method struct {
+		Name   string `json:"name"`
+		Params []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"params"`
+		Return struct {
+			Type string `json:"type"`
+		} `json:"return"`
 		AllCodeSnippets []struct {
 			Lang     string `json:"lang"`
 			LangSlug string `json:"langSlug"`
@@ -269,7 +277,26 @@ func dataPackProblem(item dataPackIndexItem, meta dataPackMetadata) Problem {
 		TopicTags:  topicTags,
 		Patterns:   append([]string(nil), tags...),
 		Snippets:   dataPackSnippets(meta),
+		Method:     dataPackMethod(meta),
 	}
+}
+
+func dataPackMethod(meta dataPackMetadata) Method {
+	method := Method{
+		Name:       strings.TrimSpace(meta.Method.Name),
+		ReturnType: strings.TrimSpace(meta.Method.Return.Type),
+		Params:     make([]MethodParam, 0, len(meta.Method.Params)),
+	}
+	for _, param := range meta.Method.Params {
+		if strings.TrimSpace(param.Name) == "" {
+			continue
+		}
+		method.Params = append(method.Params, MethodParam{
+			Name: strings.TrimSpace(param.Name),
+			Type: strings.TrimSpace(param.Type),
+		})
+	}
+	return method
 }
 
 func dataPackSnippets(meta dataPackMetadata) []CodeSnippet {

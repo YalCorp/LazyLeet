@@ -24,12 +24,24 @@ type Problem struct {
 	Patterns   []string
 	Tracks     []string
 	Snippets   []CodeSnippet
+	Method     Method
 }
 
 type CodeSnippet struct {
 	Lang     string
 	LangSlug string
 	Code     string
+}
+
+type Method struct {
+	Name       string
+	Params     []MethodParam
+	ReturnType string
+}
+
+type MethodParam struct {
+	Name string
+	Type string
 }
 
 type Track struct {

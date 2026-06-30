@@ -230,6 +230,27 @@ func TestEditorTabInsertsIndentInsteadOfLeavingEditor(t *testing.T) {
 	}
 }
 
+func TestEditorBracketsInsertTextInsteadOfResizing(t *testing.T) {
+	model := newTestModel(t, WithSolutionStore(&fakeSolutions{}))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.editor.SetValue("")
+	_, _, beforeProblemW, beforeSolutionW, _ := editor.editorLayout(editor.width, editor.height)
+
+	updated, _ = editor.Update(key("["))
+	editor = updated.(Model)
+	updated, _ = editor.Update(key("]"))
+	editor = updated.(Model)
+	_, _, afterProblemW, afterSolutionW, _ := editor.editorLayout(editor.width, editor.height)
+
+	if got := editor.editor.Value(); got != "[]" {
+		t.Fatalf("editor value = %q, want brackets inserted", got)
+	}
+	if afterProblemW != beforeProblemW || afterSolutionW != beforeSolutionW {
+		t.Fatalf("brackets resized editor panes: problem %d->%d solution %d->%d", beforeProblemW, afterProblemW, beforeSolutionW, afterSolutionW)
+	}
+}
+
 func TestEditorFormatsGoOnSave(t *testing.T) {
 	solutions := &fakeSolutions{}
 	model := newTestModel(t, WithSolutionStore(solutions))
@@ -391,14 +412,14 @@ func TestEditorPaneResizeUsesStandardKeys(t *testing.T) {
 
 	updated, _ = editor.Update(keyCtrl('w'))
 	editor = updated.(Model)
-	updated, _ = editor.Update(key("]"))
+	updated, _ = editor.Update(key("ctrl+right"))
 	editor = updated.(Model)
 	_, _, afterProblemW, afterSolutionW, _ := editor.editorLayout(editor.width, editor.height)
 	if afterProblemW <= beforeProblemW || afterSolutionW >= beforeSolutionW {
 		t.Fatalf("resize widths = problem %d->%d solution %d->%d", beforeProblemW, afterProblemW, beforeSolutionW, afterSolutionW)
 	}
 
-	updated, _ = editor.Update(key("0"))
+	updated, _ = editor.Update(keyCtrl('0'))
 	editor = updated.(Model)
 	_, _, resetProblemW, resetSolutionW, _ := editor.editorLayout(editor.width, editor.height)
 	if resetProblemW != beforeProblemW || resetSolutionW != beforeSolutionW {
@@ -607,7 +628,7 @@ func TestResizeActivePaneChangesWidths(t *testing.T) {
 	model.activePane = DetailsPane
 	_, _, _, beforeProblemW, beforeDetailW, _ := model.layout()
 
-	updated, _ := model.Update(key("]"))
+	updated, _ := model.Update(key("ctrl+right"))
 	resized := updated.(Model)
 	_, _, _, afterProblemW, afterDetailW, _ := resized.layout()
 
@@ -625,7 +646,7 @@ func TestResizeActivePanePersistsPaneDeltas(t *testing.T) {
 	model.width = 120
 	model.activePane = DetailsPane
 
-	updated, _ := model.Update(key("]"))
+	updated, _ := model.Update(key("ctrl+right"))
 	resized := updated.(Model)
 	if layoutStore.calls != 1 {
 		t.Fatalf("SavePaneDeltas calls = %d, want 1", layoutStore.calls)
@@ -640,13 +661,13 @@ func TestResetPaneWidths(t *testing.T) {
 	model.width = 120
 	model.activePane = DetailsPane
 
-	updated, _ := model.Update(key("]"))
+	updated, _ := model.Update(key("ctrl+right"))
 	resized := updated.(Model)
 	if resized.paneDeltas == ([3]int{}) {
 		t.Fatal("resize did not store pane deltas")
 	}
 
-	updated, _ = resized.Update(key("0"))
+	updated, _ = resized.Update(keyCtrl('0'))
 	reset := updated.(Model)
 	if reset.paneDeltas != ([3]int{}) {
 		t.Fatalf("paneDeltas = %#v, want reset", reset.paneDeltas)
@@ -711,10 +732,11 @@ func newTestModel(t *testing.T, opts ...Option) Model {
 }
 
 func key(s string) tea.KeyPressMsg {
-	if len(s) == 1 {
-		return tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
-	}
 	switch s {
+	case "ctrl+left":
+		return tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl}
+	case "ctrl+right":
+		return tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModCtrl}
 	case "j":
 		return tea.KeyPressMsg{Text: "j", Code: 'j'}
 	case "k":
@@ -731,6 +753,9 @@ func key(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
+	}
+	if len(s) == 1 {
+		return tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
 	}
 	return tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
 }

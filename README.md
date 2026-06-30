@@ -53,11 +53,12 @@ go run ./cmd/lazyleet version
 ```text
 j/k      scroll
 tab      switch pane
-[        shrink active pane
-]        widen active pane
-0        reset pane widths
+ctrl+left  shrink active pane
+ctrl+right widen active pane
+ctrl+0     reset pane widths
 /        search
 e        edit solution
+r        run saved solution tests
 l        cycle language
 m        mark progress
 o        open official URL
