@@ -1,42 +1,46 @@
 # LazyLeet
 
-![LazyLeet demo](docs/assets/lazyleet-demo.gif)
+<p align="center">
+  <img src="docs/assets/lazyleet-demo.gif" alt="LazyLeet demo" width="900">
+</p>
 
-**LeetCode-style practice, but local, fast, and terminal-native.**
+LazyLeet is a local-first terminal app for practicing DSA problems.
 
-LazyLeet is what happens when your DSA grind stops living in browser tabs. Browse curated tracks, read local problem statements, write code, run example cases, submit against hidden local tests, and track progress from one clean TUI.
+It keeps the core loop in one place: pick a problem, read the prompt, write code, run examples, submit against local tests, and move on. No browser hop. No network dependency after setup. Just the practice flow, in your terminal.
 
-Think **LazyGit for DSA practice**.
+Think of it as a small, focused workspace for LeetCode-style practice. Not a replacement for LeetCode, not a content mirror, and not a giant platform. Just a fast local tool for people who like their workflow clean.
 
-## Why LazyLeet
+## Why
 
-The normal practice loop is way too noisy:
-
-```text
-open browser -> search problem -> read prompt -> switch editor -> run locally? -> lose flow
-```
-
-LazyLeet keeps the loop tight:
+DSA practice has a way of turning into tab management:
 
 ```text
-pick problem -> read prompt -> code -> run -> submit -> move on
+problem page -> editor -> terminal -> browser -> notes -> terminal -> repeat
 ```
 
-No browser dependency. No internet requirement after setup. No context switching just to stay consistent.
+LazyLeet tries to make that loop quieter:
 
-## Highlights
+```text
+choose -> read -> solve -> run -> submit -> track
+```
 
-- **Offline-first**: bring your own data packs, then practice without network.
-- **Tracks that make sense**: Blind 75, NeetCode 150, and custom packs.
-- **Three-pane browsing**: tracks, problems, and details in one terminal view.
-- **LeetCode-ish editor flow**: problem on the left, solution and output on the right.
-- **Run vs Submit**: run examples quickly, submit against every local testcase.
-- **Failed testcase reuse**: promote a failed submit case back into Run for debugging.
-- **Local progress**: SQLite-backed status tracking.
-- **Local workspace**: solutions live under `~/.lazyleet/workspace`.
-- **Resizable panes**: tune the layout once, keep it across restarts.
+The project is opinionated about one thing: practice should be easy to resume. Your problems, solutions, progress, layout, and test runs should feel close at hand.
 
-LazyLeet does **not** ship scraped LeetCode content. Problem statements, metadata, and testcases belong in external data packs that you install separately.
+## What You Can Do
+
+LazyLeet currently supports the main local practice workflow:
+
+- browse curated or custom problem tracks
+- read problem statements from local metadata
+- edit solutions beside the prompt
+- run public/example cases
+- submit against all available local test cases
+- reuse a failed submit case as a focused debug case
+- track progress locally
+- keep pane sizes across restarts
+- store solutions in a predictable local workspace
+
+Problem data is intentionally external. LazyLeet does not ship scraped statements, examples, editorials, or test cases. Bring a data pack, install it, and LazyLeet will pick it up.
 
 ## Quick Start
 
@@ -46,41 +50,55 @@ Run from source:
 go run ./cmd/lazyleet
 ```
 
-Build:
+Build a local binary:
 
 ```bash
 go build -o lazyleet ./cmd/lazyleet
 ```
 
-Check version:
+Check the version:
 
 ```bash
 go run ./cmd/lazyleet version
 ```
 
-## Controls
+## The Editor Flow
+
+Open the selected problem with `e`.
+
+Inside the editor:
 
 ```text
-j/k             scroll or move selection
-tab             switch pane
-ctrl+left/right resize panes
-ctrl+0          reset pane widths
-/               search
-e               edit solution
-ctrl+r          run examples in editor
-ctrl+t          submit all local tests in editor
-ctrl+y          use failed submit testcase
-ctrl+s          format and save
-l               cycle language
-m               mark progress
-o               open official URL
-?               help
-q / esc         quit or close
+ctrl+r   run examples
+ctrl+t   submit all local tests
+ctrl+y   use the first failed submit case
+ctrl+s   format and save
+ctrl+w   switch solution/output/problem panes
+j/k      scroll the focused non-editor pane
+```
+
+For Java, LazyLeet adds common LeetCode-style imports while running code. On save, Java formatting only happens when `javac` accepts the file. If there is a syntax error, the buffer stays unchanged.
+
+## Browse Controls
+
+```text
+j/k                 scroll or move
+tab                 switch pane
+ctrl+left/right     resize panes
+ctrl+0              reset pane widths
+/                   search
+e                   edit solution
+r                   run saved solution
+l                   cycle language
+m                   mark progress
+o                   open official URL
+?                   help
+q / esc             quit or close
 ```
 
 ## Local Files
 
-LazyLeet stores user state in `~/.lazyleet`:
+LazyLeet stores its state in `~/.lazyleet`:
 
 ```text
 ~/.lazyleet/
@@ -90,10 +108,12 @@ LazyLeet stores user state in `~/.lazyleet`:
   workspace/
 ```
 
-- `db.sqlite` stores progress.
-- `config.toml` stores layout preferences.
-- `workspace/` stores your solutions.
-- `packs/` stores external problem data.
+What lives there:
+
+- `db.sqlite` stores progress
+- `config.toml` stores layout preferences
+- `packs/` contains installed data packs
+- `workspace/` contains your solutions
 
 Example solution path:
 
@@ -103,7 +123,9 @@ Example solution path:
 
 ## Data Packs
 
-Installed packs use this structure:
+LazyLeet is data-pack driven. A pack provides metadata, statements, and tests; the app provides the local workflow around them.
+
+Installed packs use this shape:
 
 ```text
 ~/.lazyleet/packs/<pack-slug>/
@@ -115,14 +137,20 @@ Installed packs use this structure:
     <problem-test-file>
 ```
 
-During local development, LazyLeet also reads:
+During development, LazyLeet also reads local packs from:
 
 ```text
 .local/<pack-slug>-metadata/
 .local/<pack-slug>/
 ```
 
-See [docs/data-packs.md](docs/data-packs.md) for the full format.
+See [docs/data-packs.md](docs/data-packs.md) for the pack format.
+
+## Status
+
+LazyLeet is early, but usable. The core loop is in place: browse, read, edit, run, submit, debug failed cases, and track progress locally.
+
+Expect rough edges. The goal is to keep improving the local-first workflow without turning the app into something heavier than it needs to be.
 
 ## Stack
 
@@ -132,7 +160,3 @@ See [docs/data-packs.md](docs/data-packs.md) for the full format.
 - Lip Gloss
 - Cobra
 - SQLite via `modernc.org/sqlite`
-
-## Status
-
-Early, usable, and moving fast. The core loop is already here: browse, read, edit, run examples, submit local tests, reuse failed cases, save progress, and keep everything offline-friendly.
