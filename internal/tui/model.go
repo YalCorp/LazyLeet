@@ -3,13 +3,13 @@ package tui
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/YalCorp/LazyLeet/internal/catalog"
 	"github.com/YalCorp/LazyLeet/internal/storage"
@@ -48,6 +48,14 @@ type StatementStore interface {
 	ReadStatement(problem catalog.Problem) (content string, path string, err error)
 }
 
+type TestCaseStore interface {
+	CountTestCases(problem catalog.Problem) (int, string, error)
+}
+
+type PaneLayoutStore interface {
+	SavePaneDeltas(deltas [3]int) error
+}
+
 type Option func(*Model)
 
 func WithSolutionStore(store SolutionStore) Option {
@@ -62,19 +70,41 @@ func WithStatementStore(store StatementStore) Option {
 	}
 }
 
+func WithTestCaseStore(store TestCaseStore) Option {
+	return func(m *Model) {
+		m.tests = store
+	}
+}
+
+func WithPaneDeltas(deltas [3]int) Option {
+	return func(m *Model) {
+		m.paneDeltas = deltas
+	}
+}
+
+func WithPaneLayoutStore(store PaneLayoutStore) Option {
+	return func(m *Model) {
+		m.paneLayoutStore = store
+	}
+}
+
 type Model struct {
-	catalog    catalog.Catalog
-	store      ProgressStore
-	solutions  SolutionStore
-	statements StatementStore
-	openURL    URLOpener
+	catalog         catalog.Catalog
+	store           ProgressStore
+	solutions       SolutionStore
+	statements      StatementStore
+	tests           TestCaseStore
+	paneLayoutStore PaneLayoutStore
+	openURL         URLOpener
 
 	width  int
 	height int
 
-	activePane Pane
-	trackIndex int
-	problemIdx int
+	activePane   Pane
+	trackIndex   int
+	problemIdx   int
+	detailScroll int
+	paneDeltas   [3]int
 
 	mode          Mode
 	search        textinput.Model
@@ -96,6 +126,20 @@ var commands = []string{
 	"Open Notes",
 	"Show Help",
 }
+
+const (
+	paneGapWidth        = 6
+	footerGapHeight     = 1
+	chromeHeight        = 2 + footerGapHeight
+	paneResizeStep      = 4
+	trackMinWidth       = 20
+	problemMinWidth     = 34
+	detailMinWidth      = 30
+	defaultLayoutWidth  = 96
+	defaultLayoutHeight = 12
+)
+
+var paneMinWidths = [3]int{trackMinWidth, problemMinWidth, detailMinWidth}
 
 func NewModel(c catalog.Catalog, store ProgressStore, opts ...Option) Model {
 	search := textinput.New()
@@ -215,10 +259,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "tab":
 		m.activePane = (m.activePane + 1) % 3
+	case "[":
+		m = m.resizeActivePane(-paneResizeStep)
+	case "]":
+		m = m.resizeActivePane(paneResizeStep)
+	case "0":
+		m = m.resetPaneWidths()
 	case "up", "k":
-		m = m.move(-1)
+		m = m.moveOrScrollDetails(-1)
 	case "down", "j":
-		m = m.move(1)
+		m = m.moveOrScrollDetails(1)
 	case "/":
 		m.mode = ModeSearch
 		m.search.Focus()
@@ -370,9 +420,84 @@ func (m Model) move(delta int) Model {
 	case TracksPane:
 		m.trackIndex = clamp(m.trackIndex+delta, 0, len(m.catalog.Tracks)-1)
 		m.problemIdx = 0
+		m.detailScroll = 0
 	case ProblemsPane, DetailsPane:
 		problems := m.visibleProblems()
 		m.problemIdx = clamp(m.problemIdx+delta, 0, len(problems)-1)
+		m.detailScroll = 0
+	}
+	return m
+}
+
+func (m Model) moveOrScrollDetails(delta int) Model {
+	if m.activePane == DetailsPane {
+		m.detailScroll = clamp(m.detailScroll+delta, 0, m.maxDetailScroll())
+		return m
+	}
+	return m.move(delta)
+}
+
+func (m Model) maxDetailScroll() int {
+	_, _, _, _, detailW, bodyH := m.layout()
+	return max(0, len(m.detailLines(detailW))-panelBodyLimit(bodyH))
+}
+
+func (m Model) resizeActivePane(delta int) Model {
+	if delta == 0 {
+		return m
+	}
+	width, _, trackW, problemW, detailW, _ := m.layout()
+	available := max(totalPaneMinWidth(), width-paneGapWidth)
+	widths := [3]int{trackW, problemW, detailW}
+	active := int(m.activePane)
+
+	if delta > 0 {
+		remaining := delta
+		for _, donor := range resizeDonors(m.activePane) {
+			if remaining == 0 {
+				break
+			}
+			capacity := max(0, widths[donor]-paneMinWidths[donor])
+			take := min(remaining, capacity)
+			widths[donor] -= take
+			widths[active] += take
+			remaining -= take
+		}
+	} else {
+		shrink := min(-delta, max(0, widths[active]-paneMinWidths[active]))
+		widths[active] -= shrink
+		for _, receiver := range resizeReceivers(m.activePane) {
+			if shrink == 0 {
+				break
+			}
+			widths[receiver] += shrink
+			shrink = 0
+		}
+	}
+
+	widths = normalizePaneWidths(widths, available)
+	defaults := defaultPaneWidths(available)
+	for i := range m.paneDeltas {
+		m.paneDeltas[i] = widths[i] - defaults[i]
+	}
+	m.statusLine = fmt.Sprintf("Pane widths: tracks %d, problems %d, details %d", widths[0], widths[1], widths[2])
+	m = m.savePaneDeltas()
+	return m
+}
+
+func (m Model) resetPaneWidths() Model {
+	m.paneDeltas = [3]int{}
+	m.statusLine = "Pane widths reset"
+	m = m.savePaneDeltas()
+	return m
+}
+
+func (m Model) savePaneDeltas() Model {
+	if m.paneLayoutStore == nil {
+		return m
+	}
+	if err := m.paneLayoutStore.SavePaneDeltas(m.paneDeltas); err != nil {
+		m.statusLine += " (could not save layout: " + err.Error() + ")"
 	}
 	return m
 }
@@ -465,12 +590,7 @@ func (m Model) render() string {
 	if m.mode == ModeEditor {
 		return m.renderEditor()
 	}
-	width := max(m.width, 96)
-	height := max(m.height, 24)
-	trackW := max(24, width/5)
-	problemW := max(42, width*2/5)
-	detailW := max(30, width-trackW-problemW-6)
-	bodyH := max(12, height-5)
+	width, _, trackW, problemW, detailW, bodyH := m.layout()
 
 	header := headerStyle.Width(width).Render("LazyLeet  " + mutedStyle.Render("local-first DSA practice"))
 	tracks := m.renderTracks(trackW, bodyH)
@@ -485,12 +605,121 @@ func (m Model) render() string {
 	if m.mode == ModeHelp {
 		body = lipgloss.JoinVertical(lipgloss.Left, body, m.renderHelp(width))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, bar)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, "", bar)
+}
+
+func (m Model) layout() (width, height, trackW, problemW, detailW, bodyH int) {
+	width = max(m.width, defaultLayoutWidth)
+	height = max(m.height, defaultLayoutHeight)
+	available := max(totalPaneMinWidth(), width-paneGapWidth)
+	widths := applyPaneDeltas(defaultPaneWidths(available), m.paneDeltas, available)
+	trackW = widths[0]
+	problemW = widths[1]
+	detailW = widths[2]
+	bodyH = max(6, height-chromeHeight)
+	return width, height, trackW, problemW, detailW, bodyH
+}
+
+func defaultPaneWidths(available int) [3]int {
+	available = max(totalPaneMinWidth(), available)
+	extra := available - totalPaneMinWidth()
+	trackW := trackMinWidth + extra/5
+	problemW := problemMinWidth + (extra*2)/5
+	detailW := available - trackW - problemW
+	return [3]int{trackW, problemW, detailW}
+}
+
+func applyPaneDeltas(defaults, deltas [3]int, available int) [3]int {
+	widths := [3]int{
+		defaults[0] + deltas[0],
+		defaults[1] + deltas[1],
+		defaults[2] + deltas[2],
+	}
+	return normalizePaneWidths(widths, available)
+}
+
+func normalizePaneWidths(widths [3]int, available int) [3]int {
+	available = max(totalPaneMinWidth(), available)
+	for i, minWidth := range paneMinWidths {
+		if widths[i] < minWidth {
+			deficit := minWidth - widths[i]
+			widths[i] = minWidth
+			widths = takePaneWidth(widths, deficit, i)
+		}
+	}
+
+	for sum := sumPaneWidths(widths); sum > available; sum = sumPaneWidths(widths) {
+		removed := takePaneWidth(widths, sum-available, -1)
+		if removed == widths {
+			break
+		}
+		widths = removed
+	}
+	for sum := sumPaneWidths(widths); sum < available; sum = sumPaneWidths(widths) {
+		widths[2] += available - sum
+	}
+	return widths
+}
+
+func takePaneWidth(widths [3]int, amount, exclude int) [3]int {
+	for amount > 0 {
+		donor := -1
+		capacity := 0
+		for i, width := range widths {
+			if i == exclude {
+				continue
+			}
+			if c := width - paneMinWidths[i]; c > capacity {
+				donor = i
+				capacity = c
+			}
+		}
+		if donor == -1 || capacity == 0 {
+			return widths
+		}
+		take := min(amount, capacity)
+		widths[donor] -= take
+		amount -= take
+	}
+	return widths
+}
+
+func resizeDonors(pane Pane) []int {
+	switch pane {
+	case TracksPane:
+		return []int{int(ProblemsPane), int(DetailsPane)}
+	case ProblemsPane:
+		return []int{int(DetailsPane), int(TracksPane)}
+	default:
+		return []int{int(ProblemsPane), int(TracksPane)}
+	}
+}
+
+func resizeReceivers(pane Pane) []int {
+	switch pane {
+	case TracksPane:
+		return []int{int(ProblemsPane)}
+	case ProblemsPane:
+		return []int{int(DetailsPane)}
+	default:
+		return []int{int(ProblemsPane)}
+	}
+}
+
+func sumPaneWidths(widths [3]int) int {
+	return widths[0] + widths[1] + widths[2]
+}
+
+func totalPaneMinWidth() int {
+	return trackMinWidth + problemMinWidth + detailMinWidth
 }
 
 func (m Model) renderTracks(width, height int) string {
-	lines := []string{panelTitle("tracks", m.activePane == TracksPane)}
-	for i, track := range m.catalog.Tracks {
+	lines := panelLines(width, panelTitle("tracks", m.activePane == TracksPane))
+	limit := panelBodyLimit(height)
+	start := scrollStart(m.trackIndex, limit, len(m.catalog.Tracks))
+	for i := start; i < len(m.catalog.Tracks) && len(lines) < limit+2; i++ {
+		track := m.catalog.Tracks[i]
 		solved, attempted, total := m.trackProgress(track)
 		prefix := " "
 		if i == m.trackIndex {
@@ -502,15 +731,15 @@ func (m Model) renderTracks(width, height int) string {
 		}
 		lines = append(lines, line)
 	}
-	return panelStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+	return renderPanel(width, height, strings.Join(lines, "\n"))
 }
 
 func (m Model) renderProblems(width, height int) string {
-	lines := []string{panelTitle("problems", m.activePane == ProblemsPane)}
+	lines := panelLines(width, panelTitle("problems", m.activePane == ProblemsPane))
 	problems := m.visibleProblems()
-	limit := max(1, height-3)
+	limit := panelBodyLimit(height)
 	start := scrollStart(m.problemIdx, limit, len(problems))
-	for i := start; i < len(problems) && len(lines) <= limit; i++ {
+	for i := start; i < len(problems) && len(lines) < limit+2; i++ {
 		problem := problems[i]
 		status := m.selectedStatus(problem)
 		prefix := " "
@@ -523,65 +752,131 @@ func (m Model) renderProblems(width, height int) string {
 	if len(problems) == 0 {
 		lines = append(lines, mutedStyle.Render("No problems match the current search."))
 	}
-	return panelStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+	return renderPanel(width, height, strings.Join(lines, "\n"))
 }
 
 func (m Model) renderDetails(width, height int) string {
 	problem := m.SelectedProblem()
-	lines := []string{panelTitle("details", m.activePane == DetailsPane)}
+	title := panelTitle("details", m.activePane == DetailsPane)
 	if problem.Slug == "" {
-		lines = append(lines, mutedStyle.Render("Select a problem to view details."))
-		return panelStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+		return renderPanel(width, height, strings.Join(append(panelLines(width, title), mutedStyle.Render("Select a problem to view details.")), "\n"))
 	}
-	lines = append(lines,
+	lines := m.detailLines(width)
+	bodyLimit := panelBodyLimit(height)
+	maxScroll := max(0, len(lines)-bodyLimit)
+	scroll := clamp(m.detailScroll, 0, maxScroll)
+	visible := append(panelLines(width, title), lines[scroll:min(len(lines), scroll+bodyLimit)]...)
+	if maxScroll > 0 {
+		visible[0] = titleLine(title, mutedStyle.Render(fmt.Sprintf("%d/%d", scroll+1, maxScroll+1)), width)
+	}
+	return renderPanel(width, height, strings.Join(visible, "\n"))
+}
+
+func renderPanel(width, height int, content string) string {
+	return panelStyle.Width(width).Height(height).MaxHeight(height).Render(content)
+}
+
+func titleLine(left, right string, width int) string {
+	available := max(1, width-4)
+	padding := max(1, available-ansi.StringWidth(left)-ansi.StringWidth(right))
+	return left + strings.Repeat(" ", padding) + right
+}
+
+func panelLines(width int, title string) []string {
+	return []string{title, panelSeparator(width)}
+}
+
+func panelSeparator(width int) string {
+	return mutedStyle.Render(strings.Repeat("─", max(1, width-4)))
+}
+
+func panelBodyLimit(height int) int {
+	return max(1, height-4)
+}
+
+func (m Model) detailLines(width int) []string {
+	problem := m.SelectedProblem()
+	if problem.Slug == "" {
+		return nil
+	}
+	lines := []string{
 		titleStyle.Render(problem.Title),
 		fmt.Sprintf("ID: %d", problem.ID),
 		fmt.Sprintf("Difficulty: %s", difficulty(problem.Difficulty)),
 		fmt.Sprintf("Status: %s", statusBadge(m.selectedStatus(problem))),
-		fmt.Sprintf("Language: %s", m.language.Title),
-		"URL: "+urlStyle.Hyperlink(problem.URL).Render(problem.URL),
-		urlHintStyle.Render("Use ctrl + click to open in browser"),
+		"URL: " + urlStyle.Hyperlink(problem.URL).Render(truncateLine(problem.URL, max(8, width-7))),
 		"",
-	)
-	lines = append(lines, m.renderStatementPreview(problem, width, height, len(lines))...)
-	lines = append(lines,
-		"",
-		"Patterns:",
-	)
-	patterns := append([]string(nil), problem.Patterns...)
-	sort.Strings(patterns)
-	for _, pattern := range patterns {
-		lines = append(lines, "  "+pattern)
 	}
-	lines = append(lines, "", "Tracks:")
-	for _, track := range problem.Tracks {
-		lines = append(lines, "  "+track)
-	}
-	return panelStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+	lines = append(lines, m.renderStatementPreview(problem, width)...)
+	return lines
 }
 
-func (m Model) renderStatementPreview(problem catalog.Problem, width, height, used int) []string {
-	if m.statements == nil {
-		return []string{"Statement:", "  " + mutedStyle.Render("Local statement workspace unavailable.")}
+func (m Model) renderTestCount(problem catalog.Problem) string {
+	if m.tests == nil {
+		return "Test cases: unavailable"
 	}
-	content, path, err := m.statements.ReadStatement(problem)
+	count, path, err := m.tests.CountTestCases(problem)
 	if err != nil {
-		return []string{"Statement:", "  " + mutedStyle.Render("Could not read statement: "+err.Error())}
+		return "Test cases: " + mutedStyle.Render("unavailable")
 	}
-	available := max(3, height-used-11)
-	out := []string{"Statement:", "  " + mutedStyle.Render(path)}
-	for _, line := range previewLines(content, max(12, width-6), available) {
-		out = append(out, "  "+line)
+	return fmt.Sprintf("Test cases: %d (%s)", count, path)
+}
+
+func (m Model) renderStatementPreview(problem catalog.Problem, width int) []string {
+	if m.statements == nil {
+		return []string{titleStyle.Render("Statement:"), mutedStyle.Render("Local statement workspace unavailable.")}
+	}
+	content, _, err := m.statements.ReadStatement(problem)
+	if err != nil {
+		return []string{titleStyle.Render("Statement:"), mutedStyle.Render("Could not read statement: " + err.Error())}
+	}
+	out := []string{titleStyle.Render("Statement:")}
+	for _, line := range previewLines(content, max(12, width-6), 0) {
+		out = append(out, line)
 	}
 	return out
 }
 
 func (m Model) renderBottom(width int) string {
-	left := "j/k move  tab pane  / search  ctrl+p commands  e edit  l lang  m mark  o open URL  ? help  q quit"
+	left := renderFooterCommands([]footerCommand{
+		{Key: "j/k", Label: "scroll"},
+		{Key: "tab", Label: "pane"},
+		{Key: "[ ]", Label: "resize"},
+		{Key: "/", Label: "search"},
+		{Key: "e", Label: "edit"},
+		{Key: "m", Label: "mark"},
+		{Key: "?", Label: "help"},
+		{Key: "q", Label: "quit"},
+	})
+	if m.activePane == DetailsPane {
+		left = renderFooterCommands([]footerCommand{
+			{Key: "j/k", Label: "scroll"},
+			{Key: "tab", Label: "pane"},
+			{Key: "[ ]", Label: "resize"},
+			{Key: "/", Label: "search"},
+			{Key: "e", Label: "edit"},
+			{Key: "?", Label: "help"},
+			{Key: "q", Label: "quit"},
+		})
+	}
 	if m.mode == ModeSearch {
 		left = m.search.View()
 	}
-	return footerStyle.Width(width).Render(left + "  |  " + m.statusLine)
+	status := footerSeparatorStyle.Render(" | ") + footerLabelStyle.Render(m.statusLine)
+	return footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(left+status, max(1, width-2), ""))
+}
+
+type footerCommand struct {
+	Key   string
+	Label string
+}
+
+func renderFooterCommands(commands []footerCommand) string {
+	parts := make([]string, 0, len(commands))
+	for _, command := range commands {
+		parts = append(parts, footerKeyStyle.Render(command.Key)+" "+footerLabelStyle.Render(command.Label))
+	}
+	return strings.Join(parts, footerSeparatorStyle.Render("  "))
 }
 
 func (m Model) renderCommandPalette(width int) string {
@@ -600,7 +895,10 @@ func (m Model) renderHelp(width int) string {
 	lines := []string{
 		"help",
 		"j/k, up/down    move selection",
+		"details pane    j/k scroll statement",
 		"tab             cycle panes",
+		"[, ]            shrink or widen active pane",
+		"0               reset pane widths",
 		"/               search problems",
 		"ctrl+p          command palette",
 		"enter           select current item",
@@ -706,19 +1004,26 @@ func max(a, b int) int {
 
 func previewLines(content string, width, limit int) []string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
 	raw := strings.Split(content, "\n")
-	lines := make([]string, 0, min(len(raw), limit))
-	for _, line := range raw {
-		line = strings.TrimRight(line, " \t")
+	lines := make([]string, 0, max(0, limit))
+	for _, rawLine := range raw {
+		line := strings.TrimSpace(rawLine)
 		if line == "" && len(lines) == 0 {
 			continue
 		}
-		lines = append(lines, truncateLine(line, width))
-		if len(lines) == limit {
+		wrapped := wrapLine(line, width)
+		for _, wrappedLine := range wrapped {
+			lines = append(lines, wrappedLine)
+			if limit > 0 && len(lines) == limit {
+				break
+			}
+		}
+		if limit > 0 && len(lines) == limit {
 			break
 		}
 	}
-	if len(raw) > limit {
+	if limit > 0 && len(lines) == limit && len(raw) > 0 {
 		lines = append(lines, mutedStyle.Render("..."))
 	}
 	if len(lines) == 0 {
@@ -727,13 +1032,19 @@ func previewLines(content string, width, limit int) []string {
 	return lines
 }
 
+func wrapLine(line string, width int) []string {
+	if line == "" {
+		return []string{""}
+	}
+	return strings.Split(ansi.Wordwrap(line, width, " "), "\n")
+}
+
 func truncateLine(line string, width int) string {
-	runes := []rune(line)
-	if len(runes) <= width {
+	if ansi.StringWidth(line) <= width {
 		return line
 	}
 	if width <= 3 {
-		return string(runes[:max(0, width)])
+		return ansi.Truncate(line, max(0, width), "")
 	}
-	return string(runes[:width-3]) + "..."
+	return ansi.Truncate(line, width, "...")
 }

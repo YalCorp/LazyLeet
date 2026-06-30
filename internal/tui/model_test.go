@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/YalCorp/LazyLeet/internal/catalog"
 	"github.com/YalCorp/LazyLeet/internal/storage"
@@ -24,6 +26,12 @@ type fakeSolutions struct {
 	paths      map[string]string
 	readErr    error
 	saveErr    error
+}
+
+type fakePaneLayoutStore struct {
+	deltas [3]int
+	calls  int
+	err    error
 }
 
 func (f *fakeStore) Progress(_ context.Context, slug string) (storage.Status, error) {
@@ -59,6 +67,12 @@ func (f *fakeSolutions) ReadSolution(problem catalog.Problem, language workspace
 		path = filepath.Join("/workspace", problem.Slug, language.Filename)
 	}
 	return f.contents[problem.Slug+":"+language.ID], path, nil
+}
+
+func (f *fakePaneLayoutStore) SavePaneDeltas(deltas [3]int) error {
+	f.calls++
+	f.deltas = deltas
+	return f.err
 }
 
 func (f *fakeSolutions) SaveSolution(problem catalog.Problem, language workspace.Language, content string) (string, error) {
@@ -203,9 +217,234 @@ func TestDetailsRenderLocalStatementPreview(t *testing.T) {
 	model := newTestModel(t, WithStatementStore(solutions))
 
 	view := model.renderDetails(80, 28)
-	for _, want := range []string{"Statement:", "statement.md", "Given an array of integers"} {
+	for _, want := range []string{"Statement:", "Given an array of integers"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("details missing %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"statement.md", "Patterns:", "Language:"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("details contains unwanted %q:\n%s", unwanted, view)
+		}
+	}
+	if strings.Contains(ansi.Strip(view), "  Given an array") {
+		t.Fatalf("statement line is indented in details:\n%s", view)
+	}
+}
+
+func TestDetailsPaneScrollsStatement(t *testing.T) {
+	statement := strings.Join([]string{
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"line 5",
+		"line 6",
+		"line 7",
+		"line 8",
+		"line 9",
+	}, "\n")
+	solutions := &fakeSolutions{statements: map[string]string{"two-sum": statement}}
+	model := newTestModel(t, WithStatementStore(solutions))
+	model.activePane = DetailsPane
+	model.height = 12
+
+	view := model.renderDetails(80, 8)
+	if !strings.Contains(view, "Two Sum") {
+		t.Fatalf("initial details missing problem metadata:\n%s", view)
+	}
+
+	updated := tea.Model(model)
+	for i := 0; i < 6; i++ {
+		updated, _ = updated.(Model).Update(key("j"))
+	}
+	scrolled := updated.(Model)
+	view = scrolled.renderDetails(80, 8)
+	if !strings.Contains(view, "line 1") {
+		t.Fatalf("scrolled details missing first statement line:\n%s", view)
+	}
+}
+
+func TestDetailsScrollIndicatorAlignsRight(t *testing.T) {
+	statement := strings.Join([]string{
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"line 5",
+		"line 6",
+		"line 7",
+		"line 8",
+		"line 9",
+	}, "\n")
+	solutions := &fakeSolutions{statements: map[string]string{"two-sum": statement}}
+	model := newTestModel(t, WithStatementStore(solutions))
+	model.activePane = DetailsPane
+
+	view := ansi.Strip(model.renderDetails(50, 4))
+	lines := strings.Split(view, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("details view too short:\n%s", view)
+	}
+	header := lines[1]
+	if !strings.Contains(header, "DETAILS") || !strings.Contains(header, "1/") {
+		t.Fatalf("header missing title or indicator:\n%s", header)
+	}
+	if strings.Index(header, "1/")-strings.Index(header, "DETAILS") < 20 {
+		t.Fatalf("scroll indicator is not right aligned:\n%s", header)
+	}
+}
+
+func TestProblemNavigationResetsDetailsScroll(t *testing.T) {
+	model := newTestModel(t)
+	model.detailScroll = 4
+	model.activePane = ProblemsPane
+
+	updated, _ := model.Update(key("j"))
+	if updated.(Model).detailScroll != 0 {
+		t.Fatalf("detailScroll = %d, want reset to 0", updated.(Model).detailScroll)
+	}
+}
+
+func TestLayoutPaneWidthsFitTerminal(t *testing.T) {
+	model := newTestModel(t)
+	model.width = 96
+	model.height = 24
+
+	width, height, trackW, problemW, detailW, bodyH := model.layout()
+	if got := trackW + problemW + detailW + paneGapWidth; got != width {
+		t.Fatalf("pane widths + gap = %d, want %d", got, width)
+	}
+	if bodyH != height-chromeHeight {
+		t.Fatalf("bodyH = %d, want %d", bodyH, height-chromeHeight)
+	}
+	if trackW < trackMinWidth || problemW < problemMinWidth || detailW < detailMinWidth {
+		t.Fatalf("pane widths below minimums: tracks=%d problems=%d details=%d", trackW, problemW, detailW)
+	}
+}
+
+func TestRenderLeavesSpacerBetweenPanesAndFooter(t *testing.T) {
+	model := newTestModel(t)
+	model.width = 120
+	model.height = 24
+
+	view := model.render()
+	hasSpacer := false
+	for _, line := range strings.Split(ansi.Strip(view), "\n") {
+		if strings.TrimSpace(line) == "" {
+			hasSpacer = true
+			break
+		}
+	}
+	if !hasSpacer {
+		t.Fatalf("rendered view does not include spacer line above footer:\n%s", view)
+	}
+}
+
+func TestPanesRenderEqualHeightWithOverflowingTracks(t *testing.T) {
+	model := newTestModel(t)
+	for i := 0; i < 30; i++ {
+		model.catalog.Tracks = append(model.catalog.Tracks, catalog.Track{
+			Slug:     "extra-track",
+			Title:    "Extra Track",
+			Problems: []string{"two-sum"},
+		})
+	}
+
+	height := 8
+	tracks := model.renderTracks(24, height)
+	problems := model.renderProblems(42, height)
+	details := model.renderDetails(50, height)
+
+	trackHeight := lipgloss.Height(tracks)
+	if trackHeight != lipgloss.Height(problems) || trackHeight != lipgloss.Height(details) {
+		t.Fatalf("pane heights differ: tracks=%d problems=%d details=%d", trackHeight, lipgloss.Height(problems), lipgloss.Height(details))
+	}
+}
+
+func TestPanesRenderTitleSeparators(t *testing.T) {
+	model := newTestModel(t)
+
+	for name, view := range map[string]string{
+		"tracks":   model.renderTracks(24, 8),
+		"problems": model.renderProblems(42, 8),
+		"details":  model.renderDetails(50, 8),
+	} {
+		text := ansi.Strip(view)
+		if !strings.Contains(text, "──") {
+			t.Fatalf("%s pane missing title separator:\n%s", name, view)
+		}
+	}
+}
+
+func TestResizeActivePaneChangesWidths(t *testing.T) {
+	model := newTestModel(t)
+	model.width = 120
+	model.activePane = DetailsPane
+	_, _, _, beforeProblemW, beforeDetailW, _ := model.layout()
+
+	updated, _ := model.Update(key("]"))
+	resized := updated.(Model)
+	_, _, _, afterProblemW, afterDetailW, _ := resized.layout()
+
+	if afterDetailW <= beforeDetailW {
+		t.Fatalf("details width = %d, want greater than %d", afterDetailW, beforeDetailW)
+	}
+	if afterProblemW >= beforeProblemW {
+		t.Fatalf("problem width = %d, want less than %d", afterProblemW, beforeProblemW)
+	}
+}
+
+func TestResizeActivePanePersistsPaneDeltas(t *testing.T) {
+	layoutStore := &fakePaneLayoutStore{}
+	model := newTestModel(t, WithPaneLayoutStore(layoutStore))
+	model.width = 120
+	model.activePane = DetailsPane
+
+	updated, _ := model.Update(key("]"))
+	resized := updated.(Model)
+	if layoutStore.calls != 1 {
+		t.Fatalf("SavePaneDeltas calls = %d, want 1", layoutStore.calls)
+	}
+	if layoutStore.deltas != resized.paneDeltas {
+		t.Fatalf("saved deltas = %#v, want %#v", layoutStore.deltas, resized.paneDeltas)
+	}
+}
+
+func TestResetPaneWidths(t *testing.T) {
+	model := newTestModel(t)
+	model.width = 120
+	model.activePane = DetailsPane
+
+	updated, _ := model.Update(key("]"))
+	resized := updated.(Model)
+	if resized.paneDeltas == ([3]int{}) {
+		t.Fatal("resize did not store pane deltas")
+	}
+
+	updated, _ = resized.Update(key("0"))
+	reset := updated.(Model)
+	if reset.paneDeltas != ([3]int{}) {
+		t.Fatalf("paneDeltas = %#v, want reset", reset.paneDeltas)
+	}
+}
+
+func TestFooterHighlightsCommandKeys(t *testing.T) {
+	model := newTestModel(t)
+
+	footer := model.renderBottom(120)
+	if !strings.Contains(footer, "\x1b[") {
+		t.Fatalf("footer does not contain styled command keys:\n%s", footer)
+	}
+	text := ansi.Strip(footer)
+	for _, want := range []string{"j/k", "scroll", "tab", "pane"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("footer missing %q:\n%s", want, footer)
+		}
+	}
+	for _, unwanted := range []string{"move selection", "scroll details"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("footer contains stale label %q:\n%s", unwanted, footer)
 		}
 	}
 }

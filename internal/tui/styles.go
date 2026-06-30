@@ -16,6 +16,13 @@ var (
 			Foreground(lipgloss.Color("#ECEFF4")).
 			Background(lipgloss.Color("#3B4252")).
 			Padding(0, 1)
+	footerKeyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#D8DEE9")).
+			Bold(true)
+	footerLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#89929E"))
+	footerSeparatorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#89929E"))
 	overlayStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("#A3BE8C")).

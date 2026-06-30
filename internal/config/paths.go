@@ -12,6 +12,7 @@ type Paths struct {
 	AppDir       string
 	DBPath       string
 	WorkspaceDir string
+	PacksDir     string
 }
 
 func DefaultPaths() (Paths, error) {
@@ -25,6 +26,7 @@ func DefaultPaths() (Paths, error) {
 		AppDir:       appDir,
 		DBPath:       filepath.Join(appDir, "db.sqlite"),
 		WorkspaceDir: filepath.Join(appDir, "workspace"),
+		PacksDir:     filepath.Join(appDir, "packs"),
 	}, nil
 }
 
@@ -32,5 +34,8 @@ func EnsureAppDir(paths Paths) error {
 	if err := os.MkdirAll(paths.AppDir, 0o755); err != nil {
 		return err
 	}
-	return os.MkdirAll(paths.WorkspaceDir, 0o755)
+	if err := os.MkdirAll(paths.WorkspaceDir, 0o755); err != nil {
+		return err
+	}
+	return os.MkdirAll(paths.PacksDir, 0o755)
 }

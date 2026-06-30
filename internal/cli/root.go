@@ -66,12 +66,41 @@ func runTUI(runner Runner) error {
 	}
 	defer store.Close()
 
-	c, err := catalog.Load()
+	c, statementStore, testCaseStore, err := loadCatalogAndStores(paths)
 	if err != nil {
 		return err
 	}
 	solutions := workspace.New(appConfig.WorkspacePath)
-	return runner(tui.NewModel(c, store, tui.WithSolutionStore(solutions), tui.WithStatementStore(solutions)))
+	if statementStore == nil {
+		statementStore = solutions
+	}
+	opts := []tui.Option{
+		tui.WithSolutionStore(solutions),
+		tui.WithStatementStore(statementStore),
+		tui.WithPaneDeltas(appConfig.PaneDeltas),
+		tui.WithPaneLayoutStore(config.NewPaneLayoutStore(paths)),
+	}
+	if testCaseStore != nil {
+		opts = append(opts, tui.WithTestCaseStore(testCaseStore))
+	}
+	return runner(tui.NewModel(c, store, opts...))
+}
+
+func loadCatalogAndStores(paths config.Paths) (catalog.Catalog, tui.StatementStore, tui.TestCaseStore, error) {
+	packs, err := catalog.DiscoverDataPacks(paths.PacksDir, ".local")
+	if err != nil {
+		return catalog.Catalog{}, nil, nil, err
+	}
+	if len(packs) > 0 {
+		c, err := catalog.LoadDataPacks(packs)
+		if err != nil {
+			return catalog.Catalog{}, nil, nil, err
+		}
+		return c, workspace.NewMetadataStatements(packs), workspace.NewDataPackTestCases(packs), nil
+	}
+
+	c, err := catalog.Load()
+	return c, nil, nil, err
 }
 
 func runProgram(model tea.Model) error {
