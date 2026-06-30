@@ -51,6 +51,13 @@ type dataPackMetadata struct {
 			Name string `json:"name"`
 		} `json:"topic_tags"`
 	} `json:"leetcode"`
+	Method struct {
+		AllCodeSnippets []struct {
+			Lang     string `json:"lang"`
+			LangSlug string `json:"langSlug"`
+			Code     string `json:"code"`
+		} `json:"all_code_snippets"`
+	} `json:"method"`
 }
 
 func DiscoverDataPacks(roots ...string) ([]DataPack, error) {
@@ -251,6 +258,7 @@ func dataPackProblem(item dataPackIndexItem, meta dataPackMetadata) Problem {
 	title := firstNonEmpty(meta.Title, item.Title)
 	url := firstNonEmpty(meta.Link, item.Link)
 	tags := dataPackTags(meta)
+	topicTags := dataPackTopicTags(meta)
 	return Problem{
 		ID:         firstNonZero(meta.ID, item.ID),
 		Slug:       dataPackSlug(meta, title, url),
@@ -258,8 +266,25 @@ func dataPackProblem(item dataPackIndexItem, meta dataPackMetadata) Problem {
 		Difficulty: parseDifficulty(meta.Leetcode.Difficulty),
 		URL:        url,
 		Tags:       tags,
+		TopicTags:  topicTags,
 		Patterns:   append([]string(nil), tags...),
+		Snippets:   dataPackSnippets(meta),
 	}
+}
+
+func dataPackSnippets(meta dataPackMetadata) []CodeSnippet {
+	snippets := make([]CodeSnippet, 0, len(meta.Method.AllCodeSnippets))
+	for _, snippet := range meta.Method.AllCodeSnippets {
+		if strings.TrimSpace(snippet.Code) == "" || strings.TrimSpace(snippet.LangSlug) == "" {
+			continue
+		}
+		snippets = append(snippets, CodeSnippet{
+			Lang:     strings.TrimSpace(snippet.Lang),
+			LangSlug: strings.TrimSpace(snippet.LangSlug),
+			Code:     strings.TrimRight(snippet.Code, " \t\n\r"),
+		})
+	}
+	return snippets
 }
 
 func dataPackTags(meta dataPackMetadata) []string {
@@ -280,6 +305,23 @@ func dataPackTags(meta dataPackMetadata) []string {
 	add(meta.Subcategory)
 	for _, tag := range meta.Leetcode.TopicTags {
 		add(tag.Name)
+	}
+	return tags
+}
+
+func dataPackTopicTags(meta dataPackMetadata) []string {
+	var tags []string
+	seen := map[string]struct{}{}
+	for _, tag := range meta.Leetcode.TopicTags {
+		name := strings.TrimSpace(tag.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		tags = append(tags, name)
 	}
 	return tags
 }

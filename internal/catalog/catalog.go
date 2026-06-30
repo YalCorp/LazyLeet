@@ -20,8 +20,16 @@ type Problem struct {
 	Difficulty Difficulty
 	URL        string
 	Tags       []string
+	TopicTags  []string
 	Patterns   []string
 	Tracks     []string
+	Snippets   []CodeSnippet
+}
+
+type CodeSnippet struct {
+	Lang     string
+	LangSlug string
+	Code     string
 }
 
 type Track struct {
@@ -61,6 +69,7 @@ func Load() (Catalog, error) {
 			Difficulty: item.Difficulty,
 			URL:        "https://leetcode.com/problems/" + item.Slug + "/",
 			Tags:       tags,
+			TopicTags:  append([]string(nil), tags...),
 			Patterns:   tags,
 		}
 	}

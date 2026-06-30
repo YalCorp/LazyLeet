@@ -110,6 +110,15 @@ Each metadata file can include problem details, tags, method info, examples, and
   },
   "question": {
     "content_text": "Local statement text..."
+  },
+  "method": {
+    "all_code_snippets": [
+      {
+        "lang": "Java",
+        "langSlug": "java",
+        "code": "class Solution {\n    public int numIslands(char[][] grid) {\n        \n    }\n}"
+      }
+    ]
   }
 }
 ```
@@ -125,8 +134,19 @@ LazyLeet currently reads:
 - `leetcode.difficulty`
 - `leetcode.topic_tags[].name`
 - `question.content_text`
+- `method.all_code_snippets[].lang`
+- `method.all_code_snippets[].langSlug`
+- `method.all_code_snippets[].code`
 
 Extra fields are allowed and ignored by the catalog loader.
+
+When a solution file does not exist yet, LazyLeet uses `method.all_code_snippets` to create a LeetCode-style starter file for the selected language. Current language slug matching is:
+
+- Python: `python3`, then `python`
+- Go: `golang`, then `go`
+- Java: `java`
+
+Solution headers use only `leetcode.topic_tags[].name` for the `Tags:` line. Pack `category` and `subcategory` remain available for browsing/search, but they are not written into starter solution files.
 
 ## Test Cases
 

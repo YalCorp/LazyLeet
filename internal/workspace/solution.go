@@ -72,7 +72,7 @@ func (s Store) SaveSolution(problem catalog.Problem, language Language, content 
 
 func (s Store) SolutionPath(problem catalog.Problem, language Language) string {
 	language = normalizeLanguage(language)
-	return filepath.Join(s.root, problem.Slug, language.Filename)
+	return filepath.Join(s.root, problemWorkspaceDir(problem), language.Filename)
 }
 
 func (s Store) ReadStatement(problem catalog.Problem) (content string, path string, err error) {
@@ -96,7 +96,7 @@ func (s Store) SaveStatement(problem catalog.Problem, content string) (string, e
 }
 
 func (s Store) StatementPath(problem catalog.Problem) string {
-	return filepath.Join(s.root, problem.Slug, "statement.md")
+	return filepath.Join(s.root, problemWorkspaceDir(problem), "statement.md")
 }
 
 func normalizeLanguage(language Language) Language {
@@ -109,9 +109,12 @@ func normalizeLanguage(language Language) Language {
 }
 
 func solutionTemplate(problem catalog.Problem, language Language) string {
-	tags := append([]string(nil), problem.Tags...)
+	tags := solutionTags(problem)
 	sort.Strings(tags)
-	metadata := fmt.Sprintf("Problem: %s\nURL: %s\nDifficulty: %s\nTags: %s", problem.Title, problem.URL, problem.Difficulty, strings.Join(tags, ", "))
+	metadata := fmt.Sprintf("Problem: %s\nID: %d\nURL: %s\nTags: %s", problem.Title, problem.ID, problem.URL, strings.Join(tags, ", "))
+	if snippet, ok := problemSnippet(problem, language); ok {
+		return fmt.Sprintf("%s\n\n%s\n", languageCommentBlock(metadata, language), snippet)
+	}
 	switch normalizeLanguage(language).ID {
 	case "go":
 		return fmt.Sprintf(`package main
@@ -145,6 +148,56 @@ bundle LeetCode statements, examples, or editorials.
 class Solution:
     pass
 `, metadata)
+	}
+}
+
+func problemWorkspaceDir(problem catalog.Problem) string {
+	if problem.ID > 0 {
+		return fmt.Sprintf("%d_%s", problem.ID, problem.Slug)
+	}
+	return problem.Slug
+}
+
+func solutionTags(problem catalog.Problem) []string {
+	if len(problem.TopicTags) > 0 {
+		return append([]string(nil), problem.TopicTags...)
+	}
+	return append([]string(nil), problem.Tags...)
+}
+
+func problemSnippet(problem catalog.Problem, language Language) (string, bool) {
+	langSlugs := snippetLangSlugs(normalizeLanguage(language))
+	for _, langSlug := range langSlugs {
+		for _, snippet := range problem.Snippets {
+			if strings.EqualFold(snippet.LangSlug, langSlug) && strings.TrimSpace(snippet.Code) != "" {
+				return strings.TrimRight(snippet.Code, " \t\n\r"), true
+			}
+		}
+	}
+	return "", false
+}
+
+func snippetLangSlugs(language Language) []string {
+	switch language.ID {
+	case "python":
+		return []string{"python3", "python"}
+	case "go":
+		return []string{"golang", "go"}
+	case "java":
+		return []string{"java"}
+	default:
+		return []string{language.ID}
+	}
+}
+
+func languageCommentBlock(metadata string, language Language) string {
+	switch normalizeLanguage(language).ID {
+	case "python":
+		return fmt.Sprintf(`"""
+%s
+"""`, metadata)
+	default:
+		return "// " + strings.ReplaceAll(metadata, "\n", "\n// ")
 	}
 }
 

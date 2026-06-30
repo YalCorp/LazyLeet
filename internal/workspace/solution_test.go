@@ -16,13 +16,16 @@ func TestReadSolutionReturnsPythonTemplateByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(path, "two-sum/solution.py") {
+	if !strings.HasSuffix(path, "1_two-sum/solution.py") {
 		t.Fatalf("path = %q", path)
 	}
-	for _, want := range []string{"Problem: Two Sum", "URL: https://leetcode.com/problems/two-sum/", "Difficulty: Easy"} {
+	for _, want := range []string{"Problem: Two Sum", "ID: 1", "URL: https://leetcode.com/problems/two-sum/", "Tags: Array, Hash Table"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("template missing %q:\n%s", want, content)
 		}
+	}
+	if strings.Contains(content, "Difficulty:") {
+		t.Fatalf("solution template should not include difficulty:\n%s", content)
 	}
 }
 
@@ -46,6 +49,53 @@ func TestSupportedLanguageTemplates(t *testing.T) {
 		if !strings.Contains(content, tests[language.ID]) {
 			t.Fatalf("%s template missing %q:\n%s", language.ID, tests[language.ID], content)
 		}
+	}
+}
+
+func TestReadSolutionUsesProblemCodeSnippet(t *testing.T) {
+	store := New(t.TempDir())
+	problem := testProblem()
+	problem.Tags = []string{"Tier 1: DFS/BFS Foundations", "Grid components", "Array", "Matrix"}
+	problem.TopicTags = []string{"Array", "Matrix"}
+	problem.Snippets = []catalog.CodeSnippet{
+		{
+			Lang:     "Java",
+			LangSlug: "java",
+			Code:     "class Solution {\n    public int[] twoSum(int[] nums, int target) {\n        \n    }\n}",
+		},
+		{
+			Lang:     "Python3",
+			LangSlug: "python3",
+			Code:     "class Solution:\n    def twoSum(self, nums: List[int], target: int) -> List[int]:\n        ",
+		},
+	}
+
+	javaContent, _, err := store.ReadSolution(problem, Language{ID: "java"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(javaContent, "public int[] twoSum(int[] nums, int target)") {
+		t.Fatalf("java snippet missing method:\n%s", javaContent)
+	}
+	if strings.Contains(javaContent, "Write your solution here") {
+		t.Fatalf("java snippet template still contains fallback text:\n%s", javaContent)
+	}
+	if strings.Contains(javaContent, "Tier 1") || strings.Contains(javaContent, "Grid components") {
+		t.Fatalf("java snippet template includes non-topic tags:\n%s", javaContent)
+	}
+	if !strings.Contains(javaContent, "Tags: Array, Matrix") {
+		t.Fatalf("java snippet template missing topic tags:\n%s", javaContent)
+	}
+	if strings.Contains(javaContent, "Difficulty:") {
+		t.Fatalf("java snippet template should not include difficulty:\n%s", javaContent)
+	}
+
+	pythonContent, _, err := store.ReadSolution(problem, Language{ID: "python"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pythonContent, "def twoSum(self, nums: List[int], target: int) -> List[int]:") {
+		t.Fatalf("python snippet missing method:\n%s", pythonContent)
 	}
 }
 
@@ -83,7 +133,7 @@ func TestReadStatementReturnsLocalScaffold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(path, "two-sum/statement.md") {
+	if !strings.HasSuffix(path, "1_two-sum/statement.md") {
 		t.Fatalf("path = %q", path)
 	}
 	for _, want := range []string{"# Two Sum", "LazyLeet does not bundle LeetCode problem statements", problem.URL} {
@@ -126,5 +176,6 @@ func testProblem() catalog.Problem {
 		Difficulty: catalog.Easy,
 		URL:        "https://leetcode.com/problems/two-sum/",
 		Tags:       []string{"Hash Table", "Array"},
+		TopicTags:  []string{"Hash Table", "Array"},
 	}
 }

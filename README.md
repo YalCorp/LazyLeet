@@ -79,7 +79,7 @@ LazyLeet keeps user state in `~/.lazyleet`:
 
 Progress goes into `db.sqlite`.
 
-Solutions go into `workspace/`.
+Solutions and local statements go into ID-prefixed problem folders under `workspace/`, such as `1971_find-if-path-exists-in-graph/Solution.java`.
 
 Pane layout goes into `config.toml`.
 

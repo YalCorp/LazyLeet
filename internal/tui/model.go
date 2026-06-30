@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"go/format"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -22,6 +23,13 @@ const (
 	TracksPane Pane = iota
 	ProblemsPane
 	DetailsPane
+)
+
+type EditorPane int
+
+const (
+	EditorProblemPane EditorPane = iota
+	EditorSolutionPane
 )
 
 type Mode string
@@ -106,14 +114,17 @@ type Model struct {
 	detailScroll int
 	paneDeltas   [3]int
 
-	mode          Mode
-	search        textinput.Model
-	editor        textarea.Model
-	editorProblem catalog.Problem
-	language      workspace.Language
-	editorPath    string
-	commandIndex  int
-	statusLine    string
+	mode                Mode
+	search              textinput.Model
+	editor              textarea.Model
+	editorPane          EditorPane
+	editorPaneDelta     int
+	editorProblem       catalog.Problem
+	editorProblemScroll int
+	language            workspace.Language
+	editorPath          string
+	commandIndex        int
+	statusLine          string
 }
 
 var commands = []string{
@@ -154,6 +165,7 @@ func NewModel(c catalog.Catalog, store ProgressStore, opts ...Option) Model {
 		store:      store,
 		openURL:    openURLCommand,
 		editor:     editor,
+		editorPane: EditorSolutionPane,
 		language:   workspace.DefaultLanguage(),
 		width:      110,
 		height:     32,
@@ -340,7 +352,8 @@ func (m Model) handleCommandKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+	switch key {
 	case "esc":
 		m.editor.Blur()
 		m.mode = ModeBrowse
@@ -348,6 +361,44 @@ func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+s":
 		m = m.saveEditor()
+		return m, nil
+	case "ctrl+w":
+		m = m.toggleEditorPane()
+		return m, nil
+	case "ctrl+u":
+		m = m.scrollEditorProblem(-editorProblemScrollStep(m))
+		return m, nil
+	case "ctrl+d":
+		m = m.scrollEditorProblem(editorProblemScrollStep(m))
+		return m, nil
+	case "[":
+		m = m.resizeEditorPane(-paneResizeStep)
+		return m.resizeEditor(), nil
+	case "]":
+		m = m.resizeEditorPane(paneResizeStep)
+		return m.resizeEditor(), nil
+	case "0":
+		m.editorPaneDelta = 0
+		m.statusLine = "Editor panes reset"
+		return m.resizeEditor(), nil
+	}
+
+	if m.editorPane == EditorProblemPane {
+		switch key {
+		case "up", "k":
+			m = m.scrollEditorProblem(-1)
+		case "down", "j":
+			m = m.scrollEditorProblem(1)
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "enter":
+		m.insertEditorNewline()
+		return m, nil
+	case "tab":
+		m.editor.InsertString(editorIndentUnit(m.language))
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -371,6 +422,8 @@ func (m Model) openSelectedEditor() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.editorProblem = problem
+	m.editorProblemScroll = 0
+	m.editorPane = EditorSolutionPane
 	m.editorPath = path
 	m.editor.SetValue(content)
 	m.mode = ModeEditor
@@ -385,14 +438,136 @@ func (m Model) saveEditor() Model {
 		m.statusLine = "No solution file open"
 		return m
 	}
-	path, err := m.solutions.SaveSolution(m.editorProblem, m.language, m.editor.Value())
+	content, formatted := formatEditorContent(m.editor.Value(), m.language)
+	if formatted {
+		m.editor.SetValue(content)
+	}
+	path, err := m.solutions.SaveSolution(m.editorProblem, m.language, content)
 	if err != nil {
 		m.statusLine = "Save error: " + err.Error()
 		return m
 	}
 	m.editorPath = path
-	m.statusLine = "Saved " + path
+	if formatted {
+		m.statusLine = "Formatted and saved " + path
+	} else {
+		m.statusLine = "Saved " + path
+	}
 	return m
+}
+
+func (m *Model) insertEditorNewline() {
+	line := currentEditorLine(m.editor)
+	beforeCursor := line
+	if col := m.editor.Column(); col >= 0 && col < len([]rune(line)) {
+		beforeCursor = string([]rune(line)[:col])
+	}
+	indent := nextEditorIndent(beforeCursor, m.language)
+	m.editor.InsertString("\n" + indent)
+}
+
+func currentEditorLine(editor textarea.Model) string {
+	lines := strings.Split(editor.Value(), "\n")
+	line := editor.Line()
+	if line < 0 || line >= len(lines) {
+		return ""
+	}
+	return lines[line]
+}
+
+func nextEditorIndent(line string, language workspace.Language) string {
+	indent := leadingWhitespace(line)
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return indent
+	}
+	if opensCodeBlock(trimmed, language) {
+		return indent + editorIndentUnit(language)
+	}
+	return indent
+}
+
+func leadingWhitespace(line string) string {
+	var b strings.Builder
+	for _, r := range line {
+		if r != ' ' && r != '\t' {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func opensCodeBlock(trimmed string, language workspace.Language) bool {
+	switch language.ID {
+	case "python":
+		return strings.HasSuffix(trimmed, ":")
+	default:
+		return strings.HasSuffix(trimmed, "{") ||
+			strings.HasSuffix(trimmed, "(") ||
+			strings.HasSuffix(trimmed, "[")
+	}
+}
+
+func editorIndentUnit(language workspace.Language) string {
+	return "    "
+}
+
+func formatEditorContent(content string, language workspace.Language) (string, bool) {
+	cleaned := trimTrailingLineWhitespace(content)
+	switch language.ID {
+	case "go":
+		formatted, err := format.Source([]byte(cleaned))
+		if err == nil {
+			cleaned = string(formatted)
+		}
+	}
+	return cleaned, cleaned != content
+}
+
+func trimTrailingLineWhitespace(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) scrollEditorProblem(delta int) Model {
+	_, _, problemW, _, bodyH := m.editorLayout(max(m.width, 80), max(m.height, 20))
+	maxScroll := m.editorProblemMaxScroll(problemW, bodyH)
+	m.editorProblemScroll = clamp(m.editorProblemScroll+delta, 0, maxScroll)
+	return m
+}
+
+func (m Model) toggleEditorPane() Model {
+	if m.editorPane == EditorProblemPane {
+		m.editorPane = EditorSolutionPane
+		m.statusLine = "Solution focused"
+		return m
+	}
+	m.editorPane = EditorProblemPane
+	m.statusLine = "Problem focused"
+	return m
+}
+
+func (m Model) resizeEditorPane(delta int) Model {
+	if m.editorPane == EditorSolutionPane {
+		delta = -delta
+	}
+	m.editorPaneDelta += delta
+	m.editorPaneDelta = clamp(m.editorPaneDelta, -40, 40)
+	if m.editorPane == EditorProblemPane {
+		m.statusLine = "Problem pane resized"
+	} else {
+		m.statusLine = "Solution pane resized"
+	}
+	return m
+}
+
+func editorProblemScrollStep(m Model) int {
+	_, _, _, _, bodyH := m.editorLayout(max(m.width, 80), max(m.height, 20))
+	return max(1, panelBodyLimit(bodyH)/2)
 }
 
 func (m Model) cycleLanguage() Model {
@@ -776,6 +951,10 @@ func renderPanel(width, height int, content string) string {
 	return panelStyle.Width(width).Height(height).MaxHeight(height).Render(content)
 }
 
+func renderTightPanel(width, height int, content string) string {
+	return panelStyle.MarginRight(0).Width(width).Height(height).MaxHeight(height).Render(content)
+}
+
 func titleLine(left, right string, width int) string {
 	available := max(1, width-4)
 	padding := max(1, available-ansi.StringWidth(left)-ansi.StringWidth(right))
@@ -903,8 +1082,13 @@ func (m Model) renderHelp(width int) string {
 		"ctrl+p          command palette",
 		"enter           select current item",
 		"e               edit local solution",
+		"ctrl+w          switch editor pane",
+		"j/k             scroll focused problem pane",
+		"ctrl+u/d        page focused problem pane",
+		"tab             insert indentation while editing",
+		"enter           auto-indent while editing",
 		"l               cycle language",
-		"ctrl+s          save while editing",
+		"ctrl+s          format and save while editing",
 		"m               cycle progress status",
 		"o               open official URL",
 		"ctrl/cmd-click  open URL link in supported terminals",
@@ -917,6 +1101,7 @@ func (m Model) renderEditor() string {
 	width := max(m.width, 80)
 	height := max(m.height, 20)
 	m = m.resizeEditor()
+	_, _, problemW, solutionW, bodyH := m.editorLayout(width, height)
 
 	title := "LazyLeet  " + mutedStyle.Render("editor")
 	if m.editorProblem.Title != "" {
@@ -924,15 +1109,79 @@ func (m Model) renderEditor() string {
 	}
 	header := headerStyle.Width(width).Render(title)
 	path := mutedStyle.Width(width).Render(m.editorPath)
-	body := editorStyle.Width(max(20, width-4)).Height(max(8, height-6)).Render(m.editor.View())
-	bar := footerStyle.Width(width).Render("ctrl+s save  esc browser  ctrl+c quit  |  " + m.statusLine)
-	return lipgloss.JoinVertical(lipgloss.Left, header, path, body, bar)
+	problem := m.renderEditorProblem(problemW, bodyH)
+	solution := m.renderEditorSolution(solutionW, bodyH)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, problem, solution)
+	footer := "ctrl+w pane  j/k problem scroll  [ ] resize  0 reset  ctrl+s save  tab indent  enter auto-indent  esc close  |  " + m.statusLine
+	bar := footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(footer, max(1, width-2), ""))
+	return lipgloss.JoinVertical(lipgloss.Left, header, path, body, "", bar)
 }
 
 func (m Model) resizeEditor() Model {
-	m.editor.SetWidth(max(20, m.width-6))
-	m.editor.SetHeight(max(6, m.height-8))
+	_, _, _, solutionW, bodyH := m.editorLayout(max(m.width, 80), max(m.height, 20))
+	m.editor.SetWidth(max(20, solutionW-4))
+	m.editor.SetHeight(panelBodyLimit(bodyH))
 	return m
+}
+
+func (m Model) editorLayout(width, height int) (available, gap, problemW, solutionW, bodyH int) {
+	gap = 1
+	available = max(74, width-gap)
+	problemW = max(32, (available*42)/100+m.editorPaneDelta)
+	solutionW = available - problemW
+	if solutionW < 40 {
+		solutionW = 40
+		problemW = max(32, available-solutionW)
+	}
+	if problemW < 32 {
+		problemW = 32
+		solutionW = available - problemW
+	}
+	bodyH = max(8, height-4)
+	return available, gap, problemW, solutionW, bodyH
+}
+
+func (m Model) renderEditorProblem(width, height int) string {
+	title := panelTitle("problem", m.editorPane == EditorProblemPane)
+	bodyLimit := panelBodyLimit(height)
+	maxScroll := m.editorProblemMaxScroll(width, height)
+	scroll := clamp(m.editorProblemScroll, 0, maxScroll)
+	if maxScroll > 0 {
+		title = titleLine(title, mutedStyle.Render(fmt.Sprintf("%d/%d", scroll+1, maxScroll+1)), width)
+	}
+	lines := panelLines(width, title)
+	if m.editorProblem.Slug == "" {
+		lines = append(lines, mutedStyle.Render("No problem selected."))
+		return renderPanel(width, height, strings.Join(lines, "\n"))
+	}
+	lines = append(lines, titleStyle.Render(m.editorProblem.Title), "")
+	statementLimit := max(1, bodyLimit-2)
+	statementLines := m.editorStatementLines(width)
+	lines = append(lines, statementLines[scroll:min(len(statementLines), scroll+statementLimit)]...)
+	return renderPanel(width, height, strings.Join(lines, "\n"))
+}
+
+func (m Model) editorProblemMaxScroll(width, height int) int {
+	bodyLimit := panelBodyLimit(height)
+	statementLimit := max(1, bodyLimit-2)
+	return max(0, len(m.editorStatementLines(width))-statementLimit)
+}
+
+func (m Model) editorStatementLines(width int) []string {
+	if m.statements == nil {
+		return []string{mutedStyle.Render("Local statement workspace unavailable.")}
+	}
+	content, _, err := m.statements.ReadStatement(m.editorProblem)
+	if err != nil {
+		return []string{mutedStyle.Render("Could not read statement: " + err.Error())}
+	}
+	return previewLines(content, max(12, width-6), 0)
+}
+
+func (m Model) renderEditorSolution(width, height int) string {
+	lines := panelLines(width, panelTitle("solution", m.editorPane == EditorSolutionPane))
+	lines = append(lines, m.editor.View())
+	return renderTightPanel(width, height, strings.Join(lines, "\n"))
 }
 
 func panelTitle(title string, active bool) string {

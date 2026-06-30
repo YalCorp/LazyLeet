@@ -182,6 +182,230 @@ func TestEditSolutionSavesContent(t *testing.T) {
 	}
 }
 
+func TestEditorEnterKeepsPythonIndentAndOpensBlock(t *testing.T) {
+	model := newTestModel(t, WithSolutionStore(&fakeSolutions{}))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	editor.editor.SetValue("class Solution:\n    def twoSum(self, nums, target):")
+	updated, _ = editor.Update(key("enter"))
+	editor = updated.(Model)
+
+	want := "class Solution:\n    def twoSum(self, nums, target):\n        "
+	if got := editor.editor.Value(); got != want {
+		t.Fatalf("editor value = %q, want %q", got, want)
+	}
+}
+
+func TestEditorEnterKeepsGoIndentAndOpensBlock(t *testing.T) {
+	model := newTestModel(t, WithSolutionStore(&fakeSolutions{}))
+	model.language = workspace.Language{ID: "go", Title: "Go", Filename: "solution.go"}
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	editor.editor.SetValue("func main() {")
+	updated, _ = editor.Update(key("enter"))
+	editor = updated.(Model)
+
+	want := "func main() {\n    "
+	if got := editor.editor.Value(); got != want {
+		t.Fatalf("editor value = %q, want %q", got, want)
+	}
+}
+
+func TestEditorTabInsertsIndentInsteadOfLeavingEditor(t *testing.T) {
+	model := newTestModel(t, WithSolutionStore(&fakeSolutions{}))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.editor.SetValue("")
+
+	updated, _ = editor.Update(key("tab"))
+	editor = updated.(Model)
+
+	if editor.Mode() != ModeEditor {
+		t.Fatalf("mode = %s, want %s", editor.Mode(), ModeEditor)
+	}
+	if got := editor.editor.Value(); got != "    " {
+		t.Fatalf("editor value = %q, want four spaces", got)
+	}
+}
+
+func TestEditorFormatsGoOnSave(t *testing.T) {
+	solutions := &fakeSolutions{}
+	model := newTestModel(t, WithSolutionStore(solutions))
+	model.language = workspace.Language{ID: "go", Title: "Go", Filename: "solution.go"}
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	editor.editor.SetValue("package main\n\nfunc main(){\nfmt.Println(\"x\")\n}\n")
+	updated, _ = editor.Update(keyCtrl('s'))
+	editor = updated.(Model)
+
+	got := solutions.contents[editor.editorProblem.Slug+":go"]
+	for _, want := range []string{"func main() {", "\tfmt.Println(\"x\")"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("saved content = %q, want it to contain %q", got, want)
+		}
+	}
+	if !strings.Contains(editor.statusLine, "Formatted and saved") {
+		t.Fatalf("status line = %q, want formatted save", editor.statusLine)
+	}
+}
+
+func TestEditorRendersProblemStatementBesideSolution(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass\n"},
+		statements: map[string]string{"two-sum": "Given nums and target, return matching indices."},
+	}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 120
+	editor.height = 30
+
+	view := editor.renderEditor()
+	for _, want := range []string{"PROBLEM", "SOLUTION", "Given nums and target", "class Solution:"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("editor view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestEditorProblemPaneScrollsIndependently(t *testing.T) {
+	statement := strings.Join([]string{
+		"first line",
+		"second line",
+		"third line",
+		"fourth line",
+		"fifth line",
+		"sixth line",
+		"seventh line",
+		"eighth line",
+		"ninth line",
+		"tenth line",
+		"eleventh line",
+		"twelfth line",
+		"thirteenth line",
+		"fourteenth line",
+		"fifteenth line",
+		"sixteenth line",
+		"seventeenth line",
+		"eighteenth line",
+		"nineteenth line",
+		"twentieth line",
+	}, "\n")
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass"},
+		statements: map[string]string{"two-sum": statement},
+	}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 100
+	editor.height = 12
+
+	before := editor.renderEditor()
+	if !strings.Contains(before, "first line") {
+		t.Fatalf("editor view missing first line before scroll:\n%s", before)
+	}
+
+	updated, _ = editor.Update(keyCtrl('d'))
+	editor = updated.(Model)
+	after := editor.renderEditor()
+	if editor.editorProblemScroll == 0 {
+		t.Fatal("ctrl+d did not scroll the editor problem pane")
+	}
+	if strings.Contains(after, "first line") {
+		t.Fatalf("editor view still shows first line after scroll:\n%s", after)
+	}
+	if !strings.Contains(after, "seventh line") {
+		t.Fatalf("editor view missing later statement line after scroll:\n%s", after)
+	}
+	if editor.editor.Value() != "class Solution:\n    pass" {
+		t.Fatalf("editor content changed while scrolling problem pane: %q", editor.editor.Value())
+	}
+}
+
+func TestEditorFocusedProblemPaneScrollsSmoothlyWithJK(t *testing.T) {
+	statement := strings.Join([]string{
+		"first line",
+		"second line",
+		"third line",
+		"fourth line",
+		"fifth line",
+		"sixth line",
+		"seventh line",
+		"eighth line",
+		"ninth line",
+		"tenth line",
+		"eleventh line",
+		"twelfth line",
+		"thirteenth line",
+		"fourteenth line",
+		"fifteenth line",
+		"sixteenth line",
+		"seventeenth line",
+		"eighteenth line",
+		"nineteenth line",
+		"twentieth line",
+	}, "\n")
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass"},
+		statements: map[string]string{"two-sum": statement},
+	}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 100
+	editor.height = 12
+
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
+	if editor.editorPane != EditorProblemPane {
+		t.Fatalf("editor pane = %d, want problem pane", editor.editorPane)
+	}
+
+	updated, _ = editor.Update(key("j"))
+	editor = updated.(Model)
+	if editor.editorProblemScroll != 1 {
+		t.Fatalf("problem scroll = %d, want 1", editor.editorProblemScroll)
+	}
+	if editor.editor.Value() != "class Solution:\n    pass" {
+		t.Fatalf("editor content changed while problem pane focused: %q", editor.editor.Value())
+	}
+
+	updated, _ = editor.Update(key("k"))
+	editor = updated.(Model)
+	if editor.editorProblemScroll != 0 {
+		t.Fatalf("problem scroll = %d, want 0", editor.editorProblemScroll)
+	}
+}
+
+func TestEditorPaneResizeUsesStandardKeys(t *testing.T) {
+	model := newTestModel(t, WithSolutionStore(&fakeSolutions{}))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 120
+	editor.height = 30
+	_, _, beforeProblemW, beforeSolutionW, _ := editor.editorLayout(editor.width, editor.height)
+
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
+	updated, _ = editor.Update(key("]"))
+	editor = updated.(Model)
+	_, _, afterProblemW, afterSolutionW, _ := editor.editorLayout(editor.width, editor.height)
+	if afterProblemW <= beforeProblemW || afterSolutionW >= beforeSolutionW {
+		t.Fatalf("resize widths = problem %d->%d solution %d->%d", beforeProblemW, afterProblemW, beforeSolutionW, afterSolutionW)
+	}
+
+	updated, _ = editor.Update(key("0"))
+	editor = updated.(Model)
+	_, _, resetProblemW, resetSolutionW, _ := editor.editorLayout(editor.width, editor.height)
+	if resetProblemW != beforeProblemW || resetSolutionW != beforeSolutionW {
+		t.Fatalf("reset widths = problem %d solution %d, want %d %d", resetProblemW, resetSolutionW, beforeProblemW, beforeSolutionW)
+	}
+}
+
 func TestEditSolutionHandlesStoreError(t *testing.T) {
 	model := newTestModel(t, WithSolutionStore(&fakeSolutions{readErr: errors.New("boom")}))
 	updated, _ := model.Update(key("e"))
@@ -505,6 +729,8 @@ func key(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Text: "l", Code: 'l'}
 	case "enter":
 		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab}
 	}
 	return tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
 }

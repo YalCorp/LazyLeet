@@ -3,6 +3,7 @@ package catalog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,15 @@ func TestDiscoverAndLoadDataPacks(t *testing.T) {
     "title_slug": "number-of-islands",
     "difficulty": "Medium",
     "topic_tags": [{"name": "Depth-First Search"}, {"name": "Matrix"}]
+  },
+  "method": {
+    "all_code_snippets": [
+      {
+        "lang": "Java",
+        "langSlug": "java",
+        "code": "class Solution {\n    public int numIslands(char[][] grid) {\n        \n    }\n}"
+      }
+    ]
   }
 }`)
 
@@ -56,6 +66,22 @@ func TestDiscoverAndLoadDataPacks(t *testing.T) {
 	}
 	if len(problem.Tags) != 4 {
 		t.Fatalf("tags = %#v, want category, subcategory, and topic tags", problem.Tags)
+	}
+	if len(problem.TopicTags) != 2 {
+		t.Fatalf("topic tags = %#v, want only LeetCode topic tags", problem.TopicTags)
+	}
+	for _, unwanted := range []string{"Tier 1: DFS/BFS Foundations", "Grid components"} {
+		for _, tag := range problem.TopicTags {
+			if tag == unwanted {
+				t.Fatalf("topic tags include non-topic tag %q: %#v", unwanted, problem.TopicTags)
+			}
+		}
+	}
+	if len(problem.Snippets) != 1 || problem.Snippets[0].LangSlug != "java" {
+		t.Fatalf("snippets = %#v", problem.Snippets)
+	}
+	if !strings.Contains(problem.Snippets[0].Code, "numIslands") {
+		t.Fatalf("snippet code = %q", problem.Snippets[0].Code)
 	}
 }
 
