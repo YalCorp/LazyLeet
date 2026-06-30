@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,13 @@ type fakePaneLayoutStore struct {
 	deltas [3]int
 	calls  int
 	err    error
+}
+
+type fakeTestCaseStore struct {
+	result       workspace.TestRunResult
+	err          error
+	lastRequest  workspace.TestRunRequest
+	requestCount int
 }
 
 func (f *fakeStore) Progress(_ context.Context, slug string) (storage.Status, error) {
@@ -102,6 +110,16 @@ func (f *fakeSolutions) ReadStatement(problem catalog.Problem) (string, string, 
 	}
 	path := filepath.Join("/workspace", problem.Slug, "statement.md")
 	return f.statements[problem.Slug], path, nil
+}
+
+func (f fakeTestCaseStore) CountTestCases(_ catalog.Problem) (int, string, error) {
+	return f.result.Total, "/tests", nil
+}
+
+func (f *fakeTestCaseStore) RunTestCases(_ catalog.Problem, _ workspace.Language, _ string, request workspace.TestRunRequest) (workspace.TestRunResult, error) {
+	f.lastRequest = request
+	f.requestCount++
+	return f.result, f.err
 }
 
 func TestNavigationChangesSelection(t *testing.T) {
@@ -251,6 +269,44 @@ func TestEditorBracketsInsertTextInsteadOfResizing(t *testing.T) {
 	}
 }
 
+func TestEditorAcceptsBracketedPasteInSolutionPane(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents: map[string]string{"two-sum:python": "class Solution:\n"},
+	}
+	model := newTestModel(t, WithSolutionStore(solutions))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	updated, _ = editor.Update(tea.PasteMsg{Content: "    def twoSum(self, nums, target):\n        return []"})
+	editor = updated.(Model)
+
+	got := editor.editor.Value()
+	for _, want := range []string{"def twoSum", "return []"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("editor value = %q, want pasted content %q", got, want)
+		}
+	}
+}
+
+func TestEditorIgnoresPasteOutsideSolutionPane(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents: map[string]string{"two-sum:python": "class Solution:\n"},
+	}
+	model := newTestModel(t, WithSolutionStore(solutions))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	before := editor.editor.Value()
+
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
+	updated, _ = editor.Update(tea.PasteMsg{Content: "pasted"})
+	editor = updated.(Model)
+
+	if editor.editor.Value() != before {
+		t.Fatalf("editor changed while output pane focused: %q", editor.editor.Value())
+	}
+}
+
 func TestEditorFormatsGoOnSave(t *testing.T) {
 	solutions := &fakeSolutions{}
 	model := newTestModel(t, WithSolutionStore(solutions))
@@ -273,6 +329,58 @@ func TestEditorFormatsGoOnSave(t *testing.T) {
 	}
 }
 
+func TestEditorFormatsJavaOnSaveWhenSyntaxIsValid(t *testing.T) {
+	solutions := &fakeSolutions{}
+	model := newTestModel(t, WithSolutionStore(solutions))
+	model.language = workspace.Language{ID: "java", Title: "Java", Filename: "Solution.java"}
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	editor.editor.SetValue("class Solution {public boolean validPath(int n,int[][] edges,int source,int destination){if(source==destination){return true;}return false;}}")
+	updated, _ = editor.Update(keyCtrl('s'))
+	editor = updated.(Model)
+
+	got := solutions.contents[editor.editorProblem.Slug+":java"]
+	for _, want := range []string{
+		"class Solution {",
+		"    public boolean validPath",
+		"        if(source==destination){",
+		"            return true;",
+		"        }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("saved content = %q, want it to contain %q", got, want)
+		}
+	}
+	if !strings.Contains(editor.statusLine, "Formatted and saved") {
+		t.Fatalf("status line = %q, want formatted save", editor.statusLine)
+	}
+}
+
+func TestEditorSkipsJavaFormatWhenSyntaxIsInvalid(t *testing.T) {
+	solutions := &fakeSolutions{}
+	model := newTestModel(t, WithSolutionStore(solutions))
+	model.language = workspace.Language{ID: "java", Title: "Java", Filename: "Solution.java"}
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	invalid := "class Solution {\n    public boolean validPath(int n, int[][] edges, int source, int destination) {\n        return true\n    }\n}\n"
+	editor.editor.SetValue(invalid)
+	updated, _ = editor.Update(keyCtrl('s'))
+	editor = updated.(Model)
+
+	got := solutions.contents[editor.editorProblem.Slug+":java"]
+	if got != invalid {
+		t.Fatalf("saved content changed after invalid Java format:\n got %q\nwant %q", got, invalid)
+	}
+	if editor.editor.Value() != invalid {
+		t.Fatalf("editor content changed after invalid Java format:\n got %q\nwant %q", editor.editor.Value(), invalid)
+	}
+	if !strings.Contains(editor.statusLine, "format skipped") {
+		t.Fatalf("status line = %q, want skipped format", editor.statusLine)
+	}
+}
+
 func TestEditorRendersProblemStatementBesideSolution(t *testing.T) {
 	solutions := &fakeSolutions{
 		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass\n"},
@@ -285,10 +393,193 @@ func TestEditorRendersProblemStatementBesideSolution(t *testing.T) {
 	editor.height = 30
 
 	view := editor.renderEditor()
-	for _, want := range []string{"PROBLEM", "SOLUTION", "Given nums and target", "class Solution:"} {
+	for _, want := range []string{"PROBLEM", "SOLUTION", "OUTPUT", "Given nums and target", "class Solution:"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("editor view missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestEditorRenderKeepsFooterInsideTerminalHeight(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass\n"},
+		statements: map[string]string{"two-sum": strings.Repeat("Given nums and target, return matching indices.\n", 20)},
+	}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 110
+	editor.height = 24
+
+	view := editor.renderEditor()
+	if got := lipgloss.Height(view); got > editor.height {
+		t.Fatalf("editor height = %d, want <= %d:\n%s", got, editor.height, view)
+	}
+	if !strings.Contains(ansi.Strip(view), "ctrl+w pane") {
+		t.Fatalf("editor footer is missing:\n%s", view)
+	}
+}
+
+func TestEditorOutputPanelShowsRunError(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass"},
+		statements: map[string]string{"two-sum": "Given nums and target"},
+	}
+	tests := fakeTestCaseStore{err: errors.New("javac failed: exit status 1\nSolution.java:7: error: cannot find symbol")}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions), WithTestCaseStore(&tests))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	updated, cmd := editor.Update(keyCtrl('r'))
+	editor = updated.(Model)
+	if cmd == nil {
+		t.Fatal("ctrl+r did not start test command")
+	}
+	msg := cmd().(testRunFinishedMsg)
+	updated, _ = editor.Update(msg)
+	editor = updated.(Model)
+	view := editor.renderEditor()
+
+	for _, want := range []string{"OUTPUT", "Run error", "javac failed", "cannot find symbol"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("editor output missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestEditorOutputPanelShowsFailedCaseIO(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass"},
+		statements: map[string]string{"two-sum": "Given nums and target"},
+	}
+	tests := fakeTestCaseStore{result: workspace.TestRunResult{
+		Passed: 0,
+		Total:  1,
+		Failures: []workspace.TestFailure{{
+			Index:    1,
+			Input:    "nums = [2,7,11,15], target = 9",
+			Actual:   "[1,0]",
+			Expected: "[0,1]",
+		}},
+		Output: "LAZYLEET_RESULT 0 1",
+	}}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions), WithTestCaseStore(&tests))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	updated, cmd := editor.Update(keyCtrl('r'))
+	editor = updated.(Model)
+	msg := cmd().(testRunFinishedMsg)
+	updated, _ = editor.Update(msg)
+	editor = updated.(Model)
+	view := strings.Join(editor.editorOutputLines(80), "\n")
+
+	for _, want := range []string{"Failed case 1", "Input", "nums = [2,7,11,15], target = 9", "Output", "[1,0]", "Expected", "[0,1]"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("editor output missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestEditorRunAndSubmitUseSeparateTestScopes(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass"},
+		statements: map[string]string{"two-sum": "Given nums and target"},
+	}
+	tests := &fakeTestCaseStore{result: workspace.TestRunResult{Passed: 1, Total: 1}}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions), WithTestCaseStore(tests))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	updated, cmd := editor.Update(keyCtrl('r'))
+	editor = updated.(Model)
+	if cmd == nil {
+		t.Fatal("ctrl+r did not start run command")
+	}
+	_ = cmd()
+	if tests.lastRequest.Mode != workspace.TestRunExamples {
+		t.Fatalf("run mode = %s, want examples", tests.lastRequest.Mode)
+	}
+
+	updated, cmd = editor.Update(keyCtrl('t'))
+	if cmd == nil {
+		t.Fatal("ctrl+t did not start submit command")
+	}
+	_ = cmd()
+	if tests.lastRequest.Mode != workspace.TestRunAll {
+		t.Fatalf("submit mode = %s, want all", tests.lastRequest.Mode)
+	}
+}
+
+func TestEditorUseFailedSubmitCaseRunsCustomCase(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass"},
+		statements: map[string]string{"two-sum": "Given nums and target"},
+	}
+	failedCase := workspace.TestCase{
+		Input:    map[string]json.RawMessage{"nums": json.RawMessage(`[2,7,11,15]`), "target": json.RawMessage(`9`)},
+		Expected: json.RawMessage(`[0,1]`),
+		Comment:  "hidden",
+	}
+	tests := &fakeTestCaseStore{result: workspace.TestRunResult{
+		Passed: 0,
+		Total:  1,
+		Failures: []workspace.TestFailure{{
+			Index:    1,
+			Input:    "nums = [2,7,11,15], target = 9",
+			Actual:   "[1,0]",
+			Expected: "[0,1]",
+			Case:     failedCase,
+		}},
+	}}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions), WithTestCaseStore(tests))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	updated, cmd := editor.Update(keyCtrl('t'))
+	editor = updated.(Model)
+	msg := cmd().(testRunFinishedMsg)
+	updated, _ = editor.Update(msg)
+	editor = updated.(Model)
+
+	updated, _ = editor.Update(keyCtrl('y'))
+	editor = updated.(Model)
+	updated, cmd = editor.Update(keyCtrl('r'))
+	if cmd == nil {
+		t.Fatal("ctrl+r did not run selected testcase")
+	}
+	_ = cmd()
+	if tests.lastRequest.Mode != workspace.TestRunCustom {
+		t.Fatalf("run mode = %s, want custom", tests.lastRequest.Mode)
+	}
+	if len(tests.lastRequest.Cases) != 1 || tests.lastRequest.Cases[0].Comment != "hidden" {
+		t.Fatalf("custom cases = %#v, want failed hidden case", tests.lastRequest.Cases)
+	}
+}
+
+func TestEditorOutputHidesRunnerProtocolLines(t *testing.T) {
+	model := newTestModel(t)
+	model.mode = ModeEditor
+	model.hasLastRun = true
+	model.lastRunMode = workspace.TestRunAll
+	model.lastRunResult = workspace.TestRunResult{
+		Passed: 0,
+		Total:  1,
+		Failures: []workspace.TestFailure{{
+			Index:    1,
+			Input:    "nums = [2,7,11,15], target = 9",
+			Actual:   "[1,0]",
+			Expected: "[0,1]",
+		}},
+		Output: "LAZYLEET_FAIL\t1\thidden\tnums = [2,7,11,15]\t[0,1]\t[1,0]\nuser log",
+	}
+
+	view := strings.Join(model.editorOutputLines(60), "\n")
+	if strings.Contains(view, "LAZYLEET_FAIL") {
+		t.Fatalf("output panel leaked protocol line:\n%s", view)
+	}
+	if !strings.Contains(view, "user log") {
+		t.Fatalf("output panel missing user log:\n%s", view)
 	}
 }
 
@@ -330,6 +621,10 @@ func TestEditorProblemPaneScrollsIndependently(t *testing.T) {
 		t.Fatalf("editor view missing first line before scroll:\n%s", before)
 	}
 
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
 	updated, _ = editor.Update(keyCtrl('d'))
 	editor = updated.(Model)
 	after := editor.renderEditor()
@@ -382,6 +677,8 @@ func TestEditorFocusedProblemPaneScrollsSmoothlyWithJK(t *testing.T) {
 
 	updated, _ = editor.Update(keyCtrl('w'))
 	editor = updated.(Model)
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
 	if editor.editorPane != EditorProblemPane {
 		t.Fatalf("editor pane = %d, want problem pane", editor.editorPane)
 	}
@@ -410,6 +707,8 @@ func TestEditorPaneResizeUsesStandardKeys(t *testing.T) {
 	editor.height = 30
 	_, _, beforeProblemW, beforeSolutionW, _ := editor.editorLayout(editor.width, editor.height)
 
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
 	updated, _ = editor.Update(keyCtrl('w'))
 	editor = updated.(Model)
 	updated, _ = editor.Update(key("ctrl+right"))

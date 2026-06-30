@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"go/format"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -30,6 +33,7 @@ type EditorPane int
 const (
 	EditorProblemPane EditorPane = iota
 	EditorSolutionPane
+	EditorOutputPane
 )
 
 type Mode string
@@ -58,7 +62,7 @@ type StatementStore interface {
 
 type TestCaseStore interface {
 	CountTestCases(problem catalog.Problem) (int, string, error)
-	RunTestCases(problem catalog.Problem, language workspace.Language, solution string) (workspace.TestRunResult, error)
+	RunTestCases(problem catalog.Problem, language workspace.Language, solution string, request workspace.TestRunRequest) (workspace.TestRunResult, error)
 }
 
 type PaneLayoutStore interface {
@@ -67,6 +71,7 @@ type PaneLayoutStore interface {
 
 type testRunFinishedMsg struct {
 	problem catalog.Problem
+	mode    workspace.TestRunMode
 	result  workspace.TestRunResult
 	err     error
 }
@@ -128,8 +133,17 @@ type Model struct {
 	editorPaneDelta     int
 	editorProblem       catalog.Problem
 	editorProblemScroll int
+	editorOutputScroll  int
 	language            workspace.Language
 	editorPath          string
+	lastRunProblem      catalog.Problem
+	lastRunMode         workspace.TestRunMode
+	lastRunResult       workspace.TestRunResult
+	lastRunErr          string
+	debugCaseProblem    string
+	debugCase           *workspace.TestCase
+	hasLastRun          bool
+	testRunning         bool
 	commandIndex        int
 	statusLine          string
 }
@@ -199,6 +213,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.resizeEditor(), nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.PasteMsg:
+		return m.handlePaste(msg)
 	case urlOpenedMsg:
 		if msg.err != nil {
 			m.statusLine = "Could not open URL: " + msg.err.Error()
@@ -207,10 +223,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case testRunFinishedMsg:
+		m.testRunning = false
+		m.hasLastRun = true
+		m.lastRunProblem = msg.problem
+		m.lastRunMode = msg.mode
+		m.lastRunResult = msg.result
+		m.lastRunErr = ""
+		if msg.err != nil {
+			m.lastRunErr = msg.err.Error()
+		}
+		m.editorOutputScroll = 0
 		m.statusLine = testRunStatus(msg)
 		return m, nil
 	}
 	return m, nil
+}
+
+func (m Model) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.mode != ModeEditor || m.editorPane != EditorSolutionPane {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.editor, cmd = m.editor.Update(msg)
+	return m, cmd
 }
 
 func (m Model) View() tea.View {
@@ -375,15 +410,20 @@ func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m = m.saveEditor()
 		return m, nil
 	case "ctrl+r":
-		return m.runEditorTests()
+		return m.runEditorTests(workspace.TestRunExamples)
+	case "ctrl+t":
+		return m.runEditorTests(workspace.TestRunAll)
+	case "ctrl+y":
+		m = m.useFailedTestCase()
+		return m, nil
 	case "ctrl+w":
 		m = m.toggleEditorPane()
 		return m, nil
 	case "ctrl+u":
-		m = m.scrollEditorProblem(-editorProblemScrollStep(m))
+		m = m.scrollEditorPane(-editorScrollStep(m))
 		return m, nil
 	case "ctrl+d":
-		m = m.scrollEditorProblem(editorProblemScrollStep(m))
+		m = m.scrollEditorPane(editorScrollStep(m))
 		return m, nil
 	case "ctrl+left":
 		m = m.resizeEditorPane(-paneResizeStep)
@@ -397,12 +437,12 @@ func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.resizeEditor(), nil
 	}
 
-	if m.editorPane == EditorProblemPane {
+	if m.editorPane != EditorSolutionPane {
 		switch key {
 		case "up", "k":
-			m = m.scrollEditorProblem(-1)
+			m = m.scrollEditorPane(-1)
 		case "down", "j":
-			m = m.scrollEditorProblem(1)
+			m = m.scrollEditorPane(1)
 		}
 		return m, nil
 	}
@@ -437,6 +477,7 @@ func (m Model) openSelectedEditor() (tea.Model, tea.Cmd) {
 	}
 	m.editorProblem = problem
 	m.editorProblemScroll = 0
+	m.editorOutputScroll = 0
 	m.editorPane = EditorSolutionPane
 	m.editorPath = path
 	m.editor.SetValue(content)
@@ -452,8 +493,8 @@ func (m Model) saveEditor() Model {
 		m.statusLine = "No solution file open"
 		return m
 	}
-	content, formatted := formatEditorContent(m.editor.Value(), m.language)
-	if formatted {
+	content, formatStatus := formatEditorContent(m.editor.Value(), m.language)
+	if formatStatus.changed {
 		m.editor.SetValue(content)
 	}
 	path, err := m.solutions.SaveSolution(m.editorProblem, m.language, content)
@@ -462,8 +503,10 @@ func (m Model) saveEditor() Model {
 		return m
 	}
 	m.editorPath = path
-	if formatted {
+	if formatStatus.changed {
 		m.statusLine = "Formatted and saved " + path
+	} else if formatStatus.skipped {
+		m.statusLine = "Saved " + path + " (format skipped: " + formatStatus.reason + ")"
 	} else {
 		m.statusLine = "Saved " + path
 	}
@@ -489,11 +532,17 @@ func (m Model) runSelectedTests() (tea.Model, tea.Cmd) {
 		m.statusLine = "Run error: " + err.Error()
 		return m, nil
 	}
-	m.statusLine = "Running tests for " + problem.Title
-	return m, runTestsCmd(m.tests, problem, m.language, content)
+	m.statusLine = "Running examples for " + problem.Title
+	m.testRunning = true
+	m.hasLastRun = false
+	m.lastRunProblem = problem
+	m.lastRunMode = workspace.TestRunExamples
+	m.lastRunErr = ""
+	m.editorOutputScroll = 0
+	return m, runTestsCmd(m.tests, problem, m.language, content, workspace.TestRunRequest{Mode: workspace.TestRunExamples})
 }
 
-func (m Model) runEditorTests() (tea.Model, tea.Cmd) {
+func (m Model) runEditorTests(mode workspace.TestRunMode) (tea.Model, tea.Cmd) {
 	if m.editorProblem.Slug == "" {
 		m.statusLine = "No solution file open"
 		return m, nil
@@ -502,33 +551,69 @@ func (m Model) runEditorTests() (tea.Model, tea.Cmd) {
 		m.statusLine = "Test runner unavailable"
 		return m, nil
 	}
-	m.statusLine = "Running tests for " + m.editorProblem.Title
-	return m, runTestsCmd(m.tests, m.editorProblem, m.language, m.editor.Value())
+	request := workspace.TestRunRequest{Mode: mode}
+	label := "examples"
+	if mode == workspace.TestRunAll {
+		label = "submit"
+	} else if m.debugCase != nil && m.debugCaseProblem == m.editorProblem.Slug {
+		request = workspace.TestRunRequest{Mode: workspace.TestRunCustom, Cases: []workspace.TestCase{*m.debugCase}}
+		label = "selected testcase"
+	}
+	m.statusLine = "Running " + label + " for " + m.editorProblem.Title
+	m.testRunning = true
+	m.hasLastRun = false
+	m.lastRunProblem = m.editorProblem
+	m.lastRunMode = request.Mode
+	m.lastRunErr = ""
+	m.editorOutputScroll = 0
+	return m, runTestsCmd(m.tests, m.editorProblem, m.language, m.editor.Value(), request)
 }
 
-func runTestsCmd(store TestCaseStore, problem catalog.Problem, language workspace.Language, solution string) tea.Cmd {
+func runTestsCmd(store TestCaseStore, problem catalog.Problem, language workspace.Language, solution string, request workspace.TestRunRequest) tea.Cmd {
 	return func() tea.Msg {
-		result, err := store.RunTestCases(problem, language, solution)
-		return testRunFinishedMsg{problem: problem, result: result, err: err}
+		result, err := store.RunTestCases(problem, language, solution, request)
+		return testRunFinishedMsg{problem: problem, mode: request.Mode, result: result, err: err}
 	}
 }
 
 func testRunStatus(msg testRunFinishedMsg) string {
+	label := "Run"
+	if msg.mode == workspace.TestRunAll {
+		label = "Submit"
+	}
 	if msg.err != nil {
-		return "Run error: " + msg.err.Error()
+		return label + " error: " + msg.err.Error()
 	}
 	if msg.result.Total == 0 {
 		return "No tests ran for " + msg.problem.Title
 	}
 	if msg.result.Passed == msg.result.Total {
-		return fmt.Sprintf("Tests passed: %d/%d", msg.result.Passed, msg.result.Total)
+		return fmt.Sprintf("%s passed: %d/%d", label, msg.result.Passed, msg.result.Total)
 	}
-	status := fmt.Sprintf("Tests failed: %d/%d", msg.result.Passed, msg.result.Total)
+	status := fmt.Sprintf("%s failed: %d/%d", label, msg.result.Passed, msg.result.Total)
 	if len(msg.result.Failures) > 0 {
 		failure := msg.result.Failures[0]
 		status += fmt.Sprintf(" case %d expected %s got %s", failure.Index, failure.Expected, failure.Actual)
 	}
 	return status
+}
+
+func (m Model) useFailedTestCase() Model {
+	if len(m.lastRunResult.Failures) == 0 {
+		m.statusLine = "No failed testcase to use"
+		return m
+	}
+	failure := m.lastRunResult.Failures[0]
+	if len(failure.Case.Input) == 0 {
+		m.statusLine = "Failed testcase data unavailable"
+		return m
+	}
+	tc := failure.Case
+	m.debugCase = &tc
+	m.debugCaseProblem = m.lastRunProblem.Slug
+	m.editorOutputScroll = 0
+	m.statusLine = fmt.Sprintf("Using failed case %d for Run", failure.Index)
+	return m
 }
 
 func (m *Model) insertEditorNewline() {
@@ -588,16 +673,189 @@ func editorIndentUnit(language workspace.Language) string {
 	return "    "
 }
 
-func formatEditorContent(content string, language workspace.Language) (string, bool) {
-	cleaned := trimTrailingLineWhitespace(content)
+type editorFormatStatus struct {
+	changed bool
+	skipped bool
+	reason  string
+}
+
+func formatEditorContent(content string, language workspace.Language) (string, editorFormatStatus) {
 	switch language.ID {
 	case "go":
+		cleaned := trimTrailingLineWhitespace(content)
 		formatted, err := format.Source([]byte(cleaned))
 		if err == nil {
 			cleaned = string(formatted)
 		}
+		return cleaned, editorFormatStatus{changed: cleaned != content}
+	case "java":
+		if !javaCompiles(content) {
+			return content, editorFormatStatus{skipped: true, reason: "syntax error"}
+		}
+		formatted := formatJavaContent(content)
+		return formatted, editorFormatStatus{changed: formatted != content}
+	default:
+		cleaned := trimTrailingLineWhitespace(content)
+		return cleaned, editorFormatStatus{changed: cleaned != content}
 	}
-	return cleaned, cleaned != content
+}
+
+func javaCompiles(content string) bool {
+	dir, err := os.MkdirTemp("", "lazyleet-format-java-*")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+
+	source := "import java.util.*;\nimport java.io.*;\nimport java.math.*;\n\n" + content
+	if err := os.WriteFile(filepath.Join(dir, "Solution.java"), []byte(source), 0o644); err != nil {
+		return false
+	}
+	cmd := exec.Command("javac", "-proc:none", "Solution.java")
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
+
+func formatJavaContent(content string) string {
+	tokens := javaFormatTokens(trimTrailingLineWhitespace(content))
+	lines := make([]string, 0, len(tokens))
+	indent := 0
+	blank := false
+	for _, token := range tokens {
+		text := strings.TrimSpace(token.text)
+		if text == "" {
+			if !blank && len(lines) > 0 {
+				lines = append(lines, "")
+				blank = true
+			}
+			continue
+		}
+		if token.dedentBefore {
+			indent = max(0, indent-1)
+		}
+		lines = append(lines, strings.Repeat(editorIndentUnit(workspace.Language{ID: "java"}), indent)+text)
+		blank = false
+		if token.indentAfter {
+			indent++
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+type javaFormatToken struct {
+	text         string
+	indentAfter  bool
+	dedentBefore bool
+}
+
+func javaFormatTokens(content string) []javaFormatToken {
+	var tokens []javaFormatToken
+	var b strings.Builder
+	inLineComment := false
+	inBlockComment := false
+	inString := false
+	inChar := false
+	escaped := false
+	parenDepth := 0
+	runes := []rune(content)
+
+	flush := func(indentAfter, dedentBefore bool) {
+		text := strings.TrimSpace(b.String())
+		if text != "" {
+			tokens = append(tokens, javaFormatToken{text: text, indentAfter: indentAfter, dedentBefore: dedentBefore})
+		}
+		b.Reset()
+	}
+
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+
+		if inLineComment {
+			if ch == '\n' {
+				flush(false, false)
+				inLineComment = false
+				continue
+			}
+			b.WriteRune(ch)
+			continue
+		}
+		if inBlockComment {
+			b.WriteRune(ch)
+			if ch == '*' && next == '/' {
+				i++
+				b.WriteRune(next)
+				inBlockComment = false
+			}
+			continue
+		}
+		if inString || inChar {
+			b.WriteRune(ch)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if inString && ch == '"' {
+				inString = false
+			}
+			if inChar && ch == '\'' {
+				inChar = false
+			}
+			continue
+		}
+
+		switch {
+		case ch == '/' && next == '/':
+			b.WriteRune(ch)
+			i++
+			b.WriteRune(next)
+			inLineComment = true
+		case ch == '/' && next == '*':
+			b.WriteRune(ch)
+			i++
+			b.WriteRune(next)
+			inBlockComment = true
+		case ch == '"':
+			b.WriteRune(ch)
+			inString = true
+		case ch == '\'':
+			b.WriteRune(ch)
+			inChar = true
+		case ch == '(':
+			parenDepth++
+			b.WriteRune(ch)
+		case ch == ')':
+			parenDepth = max(0, parenDepth-1)
+			b.WriteRune(ch)
+		case ch == '{':
+			b.WriteRune(ch)
+			flush(true, false)
+		case ch == '}':
+			flush(false, false)
+			b.WriteRune(ch)
+			if next == ';' {
+				i++
+				b.WriteRune(next)
+			}
+			flush(false, true)
+		case ch == ';' && parenDepth == 0:
+			b.WriteRune(ch)
+			flush(false, false)
+		case ch == '\n':
+			flush(false, false)
+		default:
+			b.WriteRune(ch)
+		}
+	}
+	flush(false, false)
+	return tokens
 }
 
 func trimTrailingLineWhitespace(content string) string {
@@ -615,19 +873,42 @@ func (m Model) scrollEditorProblem(delta int) Model {
 	return m
 }
 
-func (m Model) toggleEditorPane() Model {
-	if m.editorPane == EditorProblemPane {
-		m.editorPane = EditorSolutionPane
-		m.statusLine = "Solution focused"
+func (m Model) scrollEditorOutput(delta int) Model {
+	_, _, _, outputH := editorRightHeights(m.editorBodyHeight(max(m.height, 20)))
+	_, _, _, solutionW, _ := m.editorLayout(max(m.width, 80), max(m.height, 20))
+	maxScroll := m.editorOutputMaxScroll(solutionW, outputH)
+	m.editorOutputScroll = clamp(m.editorOutputScroll+delta, 0, maxScroll)
+	return m
+}
+
+func (m Model) scrollEditorPane(delta int) Model {
+	switch m.editorPane {
+	case EditorProblemPane:
+		return m.scrollEditorProblem(delta)
+	case EditorOutputPane:
+		return m.scrollEditorOutput(delta)
+	default:
 		return m
 	}
-	m.editorPane = EditorProblemPane
-	m.statusLine = "Problem focused"
+}
+
+func (m Model) toggleEditorPane() Model {
+	switch m.editorPane {
+	case EditorSolutionPane:
+		m.editorPane = EditorOutputPane
+		m.statusLine = "Output focused"
+	case EditorOutputPane:
+		m.editorPane = EditorProblemPane
+		m.statusLine = "Problem focused"
+	default:
+		m.editorPane = EditorSolutionPane
+		m.statusLine = "Solution focused"
+	}
 	return m
 }
 
 func (m Model) resizeEditorPane(delta int) Model {
-	if m.editorPane == EditorSolutionPane {
+	if m.editorPane != EditorProblemPane {
 		delta = -delta
 	}
 	m.editorPaneDelta += delta
@@ -635,13 +916,13 @@ func (m Model) resizeEditorPane(delta int) Model {
 	if m.editorPane == EditorProblemPane {
 		m.statusLine = "Problem pane resized"
 	} else {
-		m.statusLine = "Solution pane resized"
+		m.statusLine = "Editor column resized"
 	}
 	return m
 }
 
-func editorProblemScrollStep(m Model) int {
-	_, _, _, _, bodyH := m.editorLayout(max(m.width, 80), max(m.height, 20))
+func editorScrollStep(m Model) int {
+	bodyH := m.editorBodyHeight(max(m.height, 20))
 	return max(1, panelBodyLimit(bodyH)/2)
 }
 
@@ -1161,9 +1442,11 @@ func (m Model) renderHelp(width int) string {
 		"e               edit local solution",
 		"r               run saved solution tests",
 		"ctrl+w          switch editor pane",
-		"ctrl+r          run current editor buffer",
-		"j/k             scroll focused problem pane",
-		"ctrl+u/d        page focused problem pane",
+		"ctrl+r          run examples or selected testcase",
+		"ctrl+t          submit against all local tests",
+		"ctrl+y          use failed submit testcase",
+		"j/k             scroll focused editor pane",
+		"ctrl+u/d        page focused editor pane",
 		"tab             insert indentation while editing",
 		"enter           auto-indent while editing",
 		"l               cycle language",
@@ -1181,6 +1464,7 @@ func (m Model) renderEditor() string {
 	height := max(m.height, 20)
 	m = m.resizeEditor()
 	_, _, problemW, solutionW, bodyH := m.editorLayout(width, height)
+	solutionH, outputH, rightGap, _ := editorRightHeights(bodyH)
 
 	title := "LazyLeet  " + mutedStyle.Render("editor")
 	if m.editorProblem.Title != "" {
@@ -1189,17 +1473,25 @@ func (m Model) renderEditor() string {
 	header := headerStyle.Width(width).Render(title)
 	path := mutedStyle.Width(width).Render(m.editorPath)
 	problem := m.renderEditorProblem(problemW, bodyH)
-	solution := m.renderEditorSolution(solutionW, bodyH)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, problem, solution)
-	footer := "ctrl+w pane  j/k problem scroll  ctrl+left/right resize  ctrl+0 reset  ctrl+r run  ctrl+s save  tab indent  enter auto-indent  esc close  |  " + m.statusLine
+	solution := m.renderEditorSolution(solutionW, solutionH)
+	output := m.renderEditorOutput(solutionW, outputH)
+	rightParts := []string{solution}
+	for i := 0; i < rightGap; i++ {
+		rightParts = append(rightParts, strings.Repeat(" ", max(1, solutionW)))
+	}
+	rightParts = append(rightParts, output)
+	right := lipgloss.JoinVertical(lipgloss.Left, rightParts...)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, problem, right)
+	footer := "ctrl+w pane  j/k scroll  ctrl+u/d page  ctrl+left/right resize  ctrl+r run  ctrl+t submit  ctrl+y use case  ctrl+s save  esc close  |  " + m.statusLine
 	bar := footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(footer, max(1, width-2), ""))
 	return lipgloss.JoinVertical(lipgloss.Left, header, path, body, "", bar)
 }
 
 func (m Model) resizeEditor() Model {
 	_, _, _, solutionW, bodyH := m.editorLayout(max(m.width, 80), max(m.height, 20))
+	solutionH, _, _, _ := editorRightHeights(bodyH)
 	m.editor.SetWidth(max(20, solutionW-4))
-	m.editor.SetHeight(panelBodyLimit(bodyH))
+	m.editor.SetHeight(panelBodyLimit(solutionH))
 	return m
 }
 
@@ -1218,6 +1510,23 @@ func (m Model) editorLayout(width, height int) (available, gap, problemW, soluti
 	}
 	bodyH = max(8, height-4)
 	return available, gap, problemW, solutionW, bodyH
+}
+
+func (m Model) editorBodyHeight(height int) int {
+	_, _, _, _, bodyH := m.editorLayout(max(m.width, 80), height)
+	return bodyH
+}
+
+func editorRightHeights(bodyH int) (solutionH, outputH, gap, total int) {
+	gap = 1
+	outputH = clamp((bodyH*40)/100, 7, max(7, bodyH-7))
+	solutionH = max(6, bodyH-outputH-gap)
+	total = solutionH + gap + outputH
+	if total > bodyH {
+		outputH = max(4, bodyH-solutionH-gap)
+		total = solutionH + gap + outputH
+	}
+	return solutionH, outputH, gap, total
 }
 
 func (m Model) renderEditorProblem(width, height int) string {
@@ -1261,6 +1570,96 @@ func (m Model) renderEditorSolution(width, height int) string {
 	lines := panelLines(width, panelTitle("solution", m.editorPane == EditorSolutionPane))
 	lines = append(lines, m.editor.View())
 	return renderTightPanel(width, height, strings.Join(lines, "\n"))
+}
+
+func (m Model) renderEditorOutput(width, height int) string {
+	title := panelTitle("output", m.editorPane == EditorOutputPane)
+	bodyLines := m.editorOutputLines(width)
+	bodyLimit := panelBodyLimit(height)
+	maxScroll := max(0, len(bodyLines)-bodyLimit)
+	scroll := clamp(m.editorOutputScroll, 0, maxScroll)
+	if maxScroll > 0 {
+		title = titleLine(title, mutedStyle.Render(fmt.Sprintf("%d/%d", scroll+1, maxScroll+1)), width)
+	}
+	lines := append(panelLines(width, title), bodyLines[scroll:min(len(bodyLines), scroll+bodyLimit)]...)
+	return renderTightPanel(width, height, strings.Join(lines, "\n"))
+}
+
+func (m Model) editorOutputMaxScroll(width, height int) int {
+	return max(0, len(m.editorOutputLines(width))-panelBodyLimit(height))
+}
+
+func (m Model) editorOutputLines(width int) []string {
+	wrapWidth := max(12, width-6)
+	if m.testRunning {
+		if m.lastRunMode == workspace.TestRunAll {
+			return []string{mutedStyle.Render("Submitting against all local test cases...")}
+		}
+		return []string{mutedStyle.Render("Running examples...")}
+	}
+	if !m.hasLastRun {
+		return []string{mutedStyle.Render("Run examples with ctrl+r. Submit all local tests with ctrl+t.")}
+	}
+	if m.lastRunErr != "" {
+		return append([]string{hardStyle.Render("Run error")}, previewLines(m.lastRunErr, wrapWidth, 0)...)
+	}
+	result := m.lastRunResult
+	lines := []string{runResultHeading(m.lastRunMode)}
+	if m.debugCase != nil && m.debugCaseProblem == m.editorProblem.Slug && m.lastRunMode == workspace.TestRunCustom {
+		lines = append(lines, mutedStyle.Render("Selected testcase"))
+	}
+	if result.Total > 0 && result.Passed == result.Total {
+		lines = append(lines, fmt.Sprintf("Result: %d/%d passed", result.Passed, result.Total), easyStyle.Render("Accepted"))
+	} else if len(result.Failures) > 0 {
+		failure := result.Failures[0]
+		lines = append(lines,
+			hardStyle.Render(fmt.Sprintf("Failed case %d", failure.Index)),
+			titleStyle.Render("Input"),
+		)
+		lines = append(lines, previewLines(failure.Input, wrapWidth, 0)...)
+		lines = append(lines,
+			titleStyle.Render("Output"),
+		)
+		lines = append(lines, previewLines(failure.Actual, wrapWidth, 0)...)
+		lines = append(lines,
+			titleStyle.Render("Expected"),
+		)
+		lines = append(lines, previewLines(failure.Expected, wrapWidth, 0)...)
+		if m.lastRunMode == workspace.TestRunAll && len(failure.Case.Input) > 0 {
+			lines = append(lines, "", mutedStyle.Render("ctrl+y use this testcase for Run"))
+		}
+	}
+	if output := visibleRunnerOutput(result.Output); output != "" {
+		lines = append(lines, "", titleStyle.Render("Runner output"))
+		lines = append(lines, previewLines(output, wrapWidth, 0)...)
+	}
+	return lines
+}
+
+func runResultHeading(mode workspace.TestRunMode) string {
+	switch mode {
+	case workspace.TestRunAll:
+		return titleStyle.Render("Submit")
+	case workspace.TestRunCustom:
+		return titleStyle.Render("Run")
+	default:
+		return titleStyle.Render("Run")
+	}
+}
+
+func visibleRunnerOutput(output string) string {
+	lines := []string{}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "LAZYLEET_RESULT ") || strings.HasPrefix(line, "LAZYLEET_FAIL\t") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func panelTitle(title string, active bool) string {
@@ -1364,7 +1763,28 @@ func wrapLine(line string, width int) []string {
 	if line == "" {
 		return []string{""}
 	}
-	return strings.Split(ansi.Wordwrap(line, width, " "), "\n")
+	wrapped := strings.Split(ansi.Wordwrap(line, width, " "), "\n")
+	out := make([]string, 0, len(wrapped))
+	for _, part := range wrapped {
+		out = append(out, hardWrapPlainLine(part, width)...)
+	}
+	return out
+}
+
+func hardWrapPlainLine(line string, width int) []string {
+	if width <= 0 || ansi.StringWidth(line) <= width || strings.Contains(line, "\x1b[") {
+		return []string{line}
+	}
+	runes := []rune(line)
+	lines := make([]string, 0, len(runes)/width+1)
+	for len(runes) > width {
+		lines = append(lines, string(runes[:width]))
+		runes = runes[width:]
+	}
+	if len(runes) > 0 {
+		lines = append(lines, string(runes))
+	}
+	return lines
 }
 
 func truncateLine(line string, width int) string {
