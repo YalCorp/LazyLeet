@@ -446,12 +446,84 @@ func TestEditorRenderKeepsFooterInsideTerminalHeight(t *testing.T) {
 }
 
 func TestEditorRightColumnHasNoGapBetweenSolutionAndOutput(t *testing.T) {
-	solutionH, outputH, gap, total := editorRightHeights(20)
+	solutionH, outputH, gap, total := (Model{}).editorRightHeights(20)
 	if gap != 0 {
 		t.Fatalf("editor right column gap = %d, want 0", gap)
 	}
 	if total != solutionH+outputH {
 		t.Fatalf("editor right column total = %d, want solution + output %d", total, solutionH+outputH)
+	}
+}
+
+func TestEditorVerticalResizeChangesSolutionAndOutputHeights(t *testing.T) {
+	model := newTestModel(t, WithSolutionStore(&fakeSolutions{}))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 120
+	editor.height = 30
+	_, _, _, _, bodyH := editor.editorLayout(editor.width, editor.height)
+	beforeSolutionH, beforeOutputH, _, _ := editor.editorRightHeights(bodyH)
+
+	updated, _ = editor.Update(key("ctrl+down"))
+	editor = updated.(Model)
+	afterSolutionH, afterOutputH, _, total := editor.editorRightHeights(bodyH)
+	if afterSolutionH <= beforeSolutionH || afterOutputH >= beforeOutputH {
+		t.Fatalf("vertical resize = solution %d->%d output %d->%d", beforeSolutionH, afterSolutionH, beforeOutputH, afterOutputH)
+	}
+	if total > bodyH {
+		t.Fatalf("right column height = %d, want <= %d", total, bodyH)
+	}
+
+	updated, _ = editor.Update(keyCtrl('0'))
+	editor = updated.(Model)
+	resetSolutionH, resetOutputH, _, _ := editor.editorRightHeights(bodyH)
+	if resetSolutionH != beforeSolutionH || resetOutputH != beforeOutputH {
+		t.Fatalf("reset heights = solution %d output %d, want %d %d", resetSolutionH, resetOutputH, beforeSolutionH, beforeOutputH)
+	}
+}
+
+func TestEditorVerticalResizeHintOnlyShowsForRightPanes(t *testing.T) {
+	model := newTestModel(t, WithSolutionStore(&fakeSolutions{}))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 120
+	editor.height = 30
+
+	if footer := ansi.Strip(editor.renderEditorBottom(editor.width)); !strings.Contains(footer, "^↑/^↓ resize") {
+		t.Fatalf("solution footer missing vertical resize hint:\n%s", footer)
+	}
+
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
+	if footer := ansi.Strip(editor.renderEditorBottom(editor.width)); !strings.Contains(footer, "^↑/^↓ resize") {
+		t.Fatalf("output footer missing vertical resize hint:\n%s", footer)
+	}
+
+	updated, _ = editor.Update(keyCtrl('w'))
+	editor = updated.(Model)
+	if footer := ansi.Strip(editor.renderEditorBottom(editor.width)); strings.Contains(footer, "^↑/^↓ resize") {
+		t.Fatalf("problem footer should hide vertical resize hint:\n%s", footer)
+	}
+}
+
+func TestEditorVerticalResizeDoesNotOverflowSmallTerminal(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": strings.Repeat("print('long line')\n", 30)},
+		statements: map[string]string{"two-sum": strings.Repeat("Given nums and target.\n", 30)},
+	}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+	editor.width = 86
+	editor.height = 20
+
+	for i := 0; i < 20; i++ {
+		updated, _ = editor.Update(key("ctrl+up"))
+		editor = updated.(Model)
+	}
+	view := editor.renderEditor()
+	if got := lipgloss.Height(view); got > editor.height {
+		t.Fatalf("editor height = %d, want <= %d:\n%s", got, editor.height, view)
 	}
 }
 
@@ -1173,6 +1245,10 @@ func key(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl}
 	case "ctrl+right":
 		return tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModCtrl}
+	case "ctrl+up":
+		return tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl}
+	case "ctrl+down":
+		return tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl}
 	case "j":
 		return tea.KeyPressMsg{Text: "j", Code: 'j'}
 	case "k":

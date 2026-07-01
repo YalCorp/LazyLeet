@@ -131,26 +131,27 @@ type Model struct {
 	detailScroll int
 	paneDeltas   [3]int
 
-	mode                Mode
-	search              textinput.Model
-	editor              textarea.Model
-	editorPane          EditorPane
-	editorPaneDelta     int
-	editorProblem       catalog.Problem
-	editorProblemScroll int
-	editorOutputScroll  int
-	language            workspace.Language
-	editorPath          string
-	lastRunProblem      catalog.Problem
-	lastRunMode         workspace.TestRunMode
-	lastRunResult       workspace.TestRunResult
-	lastRunErr          string
-	debugCaseProblem    string
-	debugCase           *workspace.TestCase
-	hasLastRun          bool
-	testRunning         bool
-	commandIndex        int
-	statusLine          string
+	mode                 Mode
+	search               textinput.Model
+	editor               textarea.Model
+	editorPane           EditorPane
+	editorPaneDelta      int
+	editorRightPaneDelta int
+	editorProblem        catalog.Problem
+	editorProblemScroll  int
+	editorOutputScroll   int
+	language             workspace.Language
+	editorPath           string
+	lastRunProblem       catalog.Problem
+	lastRunMode          workspace.TestRunMode
+	lastRunResult        workspace.TestRunResult
+	lastRunErr           string
+	debugCaseProblem     string
+	debugCase            *workspace.TestCase
+	hasLastRun           bool
+	testRunning          bool
+	commandIndex         int
+	statusLine           string
 }
 
 var commands = []string{
@@ -165,15 +166,16 @@ var commands = []string{
 }
 
 const (
-	paneGapWidth        = 6
-	footerGapHeight     = 1
-	chromeHeight        = 2 + footerGapHeight
-	paneResizeStep      = 4
-	trackMinWidth       = 20
-	problemMinWidth     = 34
-	detailMinWidth      = 30
-	defaultLayoutWidth  = 96
-	defaultLayoutHeight = 12
+	paneGapWidth          = 6
+	footerGapHeight       = 1
+	chromeHeight          = 2 + footerGapHeight
+	paneResizeStep        = 4
+	editorRightResizeStep = 2
+	trackMinWidth         = 20
+	problemMinWidth       = 34
+	detailMinWidth        = 30
+	defaultLayoutWidth    = 96
+	defaultLayoutHeight   = 12
 )
 
 var paneMinWidths = [3]int{trackMinWidth, problemMinWidth, detailMinWidth}
@@ -443,8 +445,15 @@ func (m Model) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+right":
 		m = m.resizeEditorPane(paneResizeStep)
 		return m.resizeEditor(), nil
+	case "ctrl+up":
+		m = m.resizeEditorRightPane(-editorRightResizeStep)
+		return m.resizeEditor(), nil
+	case "ctrl+down":
+		m = m.resizeEditorRightPane(editorRightResizeStep)
+		return m.resizeEditor(), nil
 	case "ctrl+0":
 		m.editorPaneDelta = 0
+		m.editorRightPaneDelta = 0
 		m.statusLine = "Editor panes reset"
 		return m.resizeEditor(), nil
 	}
@@ -889,7 +898,7 @@ func (m Model) scrollEditorProblem(delta int) Model {
 }
 
 func (m Model) scrollEditorOutput(delta int) Model {
-	_, _, _, outputH := editorRightHeights(m.editorBodyHeight(max(m.height, 20)))
+	_, _, _, outputH := m.editorRightHeights(m.editorBodyHeight(max(m.height, 20)))
 	_, _, _, solutionW, _ := m.editorLayout(max(m.width, 80), max(m.height, 20))
 	maxScroll := m.editorOutputMaxScroll(solutionW, outputH)
 	m.editorOutputScroll = clamp(m.editorOutputScroll+delta, 0, maxScroll)
@@ -933,6 +942,18 @@ func (m Model) resizeEditorPane(delta int) Model {
 	} else {
 		m.statusLine = "Editor column resized"
 	}
+	return m
+}
+
+func (m Model) resizeEditorRightPane(delta int) Model {
+	if m.editorPane != EditorSolutionPane && m.editorPane != EditorOutputPane {
+		return m
+	}
+	bodyH := m.editorBodyHeight(max(m.height, 20))
+	minDelta, maxDelta := editorRightPaneDeltaBounds(bodyH)
+	m.editorRightPaneDelta = clamp(m.editorRightPaneDelta+delta, minDelta, maxDelta)
+	m.editorOutputScroll = 0
+	m.statusLine = "Editor rows resized"
 	return m
 }
 
@@ -1504,7 +1525,7 @@ func (m Model) renderEditor() string {
 	height := max(m.height, 20)
 	m = m.resizeEditor()
 	_, _, problemW, solutionW, bodyH := m.editorLayout(width, height)
-	solutionH, outputH, rightGap, _ := editorRightHeights(bodyH)
+	solutionH, outputH, rightGap, _ := m.editorRightHeights(bodyH)
 
 	header := headerStyle.Width(width).Render("LazyLeet  " + mutedStyle.Render("editor"))
 	problem := m.renderEditorProblem(problemW, bodyH)
@@ -1522,22 +1543,28 @@ func (m Model) renderEditor() string {
 }
 
 func (m Model) renderEditorBottom(width int) string {
-	left := renderFooterCommands([]footerCommand{
+	commands := []footerCommand{
 		{Key: "^w", Label: "pane"},
 		{Key: "j/k", Label: "scroll"},
 		{Key: "^←/^→", Label: "resize"},
-		{Key: "^r", Label: "run"},
-		{Key: "^t", Label: "submit"},
-		{Key: "^s", Label: "save"},
-		{Key: "esc", Label: "close"},
-	})
+	}
+	if m.editorPane == EditorSolutionPane || m.editorPane == EditorOutputPane {
+		commands = append(commands, footerCommand{Key: "^↑/^↓", Label: "resize"})
+	}
+	commands = append(commands,
+		footerCommand{Key: "^r", Label: "run"},
+		footerCommand{Key: "^t", Label: "submit"},
+		footerCommand{Key: "^s", Label: "save"},
+		footerCommand{Key: "esc", Label: "close"},
+	)
+	left := renderFooterCommands(commands)
 	status := footerSeparatorStyle.Render(" | ") + footerLabelStyle.Render(m.statusLine)
 	return footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(left+status, max(1, width), ""))
 }
 
 func (m Model) resizeEditor() Model {
 	_, _, _, solutionW, bodyH := m.editorLayout(max(m.width, 80), max(m.height, 20))
-	solutionH, _, _, _ := editorRightHeights(bodyH)
+	solutionH, _, _, _ := m.editorRightHeights(bodyH)
 	m.editor.SetWidth(max(20, solutionW-4))
 	m.editor.SetHeight(panelBodyLimit(solutionH))
 	return m
@@ -1565,16 +1592,33 @@ func (m Model) editorBodyHeight(height int) int {
 	return bodyH
 }
 
-func editorRightHeights(bodyH int) (solutionH, outputH, gap, total int) {
+func (m Model) editorRightHeights(bodyH int) (solutionH, outputH, gap, total int) {
 	gap = 0
-	outputH = clamp((bodyH*40)/100, 7, max(7, bodyH-7))
-	solutionH = max(6, bodyH-outputH-gap)
+	outputMin := editorOutputMinHeight(bodyH)
+	outputMax := max(outputMin, bodyH-editorSolutionMinHeight(bodyH)-gap)
+	minDelta, maxDelta := editorRightPaneDeltaBounds(bodyH)
+	delta := clamp(m.editorRightPaneDelta, minDelta, maxDelta)
+	outputH = clamp((bodyH*40)/100-delta, outputMin, outputMax)
+	solutionH = max(editorSolutionMinHeight(bodyH), bodyH-outputH-gap)
 	total = solutionH + gap + outputH
 	if total > bodyH {
-		outputH = max(4, bodyH-solutionH-gap)
+		outputH = max(editorOutputMinHeight(bodyH), bodyH-solutionH-gap)
 		total = solutionH + gap + outputH
 	}
 	return solutionH, outputH, gap, total
+}
+
+func editorRightPaneDeltaBounds(bodyH int) (minDelta, maxDelta int) {
+	baseOutputH := (bodyH * 40) / 100
+	return baseOutputH - (bodyH - editorSolutionMinHeight(bodyH)), baseOutputH - editorOutputMinHeight(bodyH)
+}
+
+func editorSolutionMinHeight(bodyH int) int {
+	return min(6, max(1, bodyH-1))
+}
+
+func editorOutputMinHeight(bodyH int) int {
+	return min(7, max(1, bodyH-editorSolutionMinHeight(bodyH)))
 }
 
 func (m Model) renderEditorProblem(width, height int) string {
