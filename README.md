@@ -62,6 +62,12 @@ Check the version:
 go run ./cmd/lazyleet version
 ```
 
+Check your local setup:
+
+```bash
+go run ./cmd/lazyleet doctor
+```
+
 ## The Editor Flow
 
 Open the selected problem with `e`.

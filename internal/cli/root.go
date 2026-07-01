@@ -44,7 +44,7 @@ func NewRootCommand(opts ...Option) *cobra.Command {
 			return runTUI(cfg.runner)
 		},
 	}
-	cmd.AddCommand(newVersionCommand())
+	cmd.AddCommand(newDoctorCommand(), newVersionCommand())
 	return cmd
 }
 
