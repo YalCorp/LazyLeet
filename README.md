@@ -1,7 +1,7 @@
 # LazyLeet
 
 <p align="center">
-  <img src="docs/assets/lazyleet-demo.gif" alt="LazyLeet demo" width="900">
+  <img src="docs/assets/demo.gif" alt="LazyLeet demo" width="750">
 </p>
 
 LazyLeet is a local-first terminal app for practicing DSA problems.
