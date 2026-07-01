@@ -39,7 +39,11 @@ It is not a LeetCode replacement, content mirror, or editorial platform. LazyLee
 
 ## Install
 
-Requires Go 1.26 or newer.
+Download the latest executable package from [GitHub Releases](https://github.com/YalCorp/LazyLeet/releases).
+
+Packages are published for Linux, macOS, and Windows.
+
+If you prefer installing from source, use Go 1.26 or newer:
 
 ```bash
 go install github.com/YalCorp/LazyLeet/cmd/lazyleet@latest
