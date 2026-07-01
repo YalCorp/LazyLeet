@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS problem_progress (
 	slug TEXT PRIMARY KEY,
 	status TEXT NOT NULL CHECK (status IN ('todo', 'attempted', 'solved', 'revisiting', 'skipped')),
 	updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_preferences (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at TEXT NOT NULL
 );`)
 	return err
 }
@@ -109,6 +114,24 @@ INSERT INTO problem_progress (slug, status, updated_at)
 VALUES (?, ?, ?)
 ON CONFLICT(slug) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
 		slug, status, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (s *SQLiteStore) PreferredLanguage(ctx context.Context) (string, error) {
+	var languageID string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM app_preferences WHERE key = 'preferred_language'`).Scan(&languageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return languageID, err
+}
+
+func (s *SQLiteStore) SetPreferredLanguage(ctx context.Context, languageID string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO app_preferences (key, value, updated_at)
+VALUES ('preferred_language', ?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		languageID, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 

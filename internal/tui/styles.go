@@ -13,9 +13,7 @@ var (
 			Padding(0, 1).
 			MarginRight(1)
 	footerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ECEFF4")).
-			Background(lipgloss.Color("#3B4252")).
-			Padding(0, 1)
+			Foreground(lipgloss.Color("#ECEFF4"))
 	footerKeyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#D8DEE9")).
 			Bold(true)
@@ -23,6 +21,9 @@ var (
 				Foreground(lipgloss.Color("#89929E"))
 	footerSeparatorStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#89929E"))
+	currentLanguageStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FF6B35")).
+				Bold(true)
 	overlayStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("#A3BE8C")).

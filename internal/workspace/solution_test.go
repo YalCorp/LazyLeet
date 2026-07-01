@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,9 +20,14 @@ func TestReadSolutionReturnsPythonTemplateByDefault(t *testing.T) {
 	if !strings.HasSuffix(path, "1_two-sum/solution.py") {
 		t.Fatalf("path = %q", path)
 	}
-	for _, want := range []string{"Problem: Two Sum", "ID: 1", "URL: https://leetcode.com/problems/two-sum/", "Tags: Array, Hash Table"} {
+	for _, want := range []string{"Problem: Two Sum", "Tags: Array, Hash Table"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("template missing %q:\n%s", want, content)
+		}
+	}
+	for _, unwanted := range []string{"ID: 1", "URL: https://leetcode.com/problems/two-sum/"} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("template contains unwanted %q:\n%s", unwanted, content)
 		}
 	}
 	if strings.Contains(content, "Difficulty:") {
@@ -48,6 +54,40 @@ func TestSupportedLanguageTemplates(t *testing.T) {
 		}
 		if !strings.Contains(content, tests[language.ID]) {
 			t.Fatalf("%s template missing %q:\n%s", language.ID, tests[language.ID], content)
+		}
+	}
+}
+
+func TestReadSolutionRemovesLegacyIDAndURLMetadata(t *testing.T) {
+	store := New(t.TempDir())
+	problem := testProblem()
+	legacyByLanguage := map[string]string{
+		"python": "\"\"\"\nProblem: Two Sum\nID: 1\nURL: https://leetcode.com/problems/two-sum/\nTags: Array\n\"\"\"\n\nclass Solution:\n    pass\n",
+		"go":     "package main\n\n// Problem: Two Sum\n// ID: 1\n// URL: https://leetcode.com/problems/two-sum/\n// Tags: Array\n\nfunc main() {}\n",
+		"java":   "// Problem: Two Sum\n// ID: 1\n// URL: https://leetcode.com/problems/two-sum/\n// Tags: Array\n\nclass Solution {}\n",
+	}
+
+	for _, language := range SupportedLanguages() {
+		path := store.SolutionPath(problem, language)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(legacyByLanguage[language.ID]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		content, _, err := store.ReadSolution(problem, language)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"Problem: Two Sum", "Tags: Array"} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("%s content missing %q:\n%s", language.ID, want, content)
+			}
+		}
+		for _, unwanted := range []string{"ID: 1", "URL: https://leetcode.com/problems/two-sum/"} {
+			if strings.Contains(content, unwanted) {
+				t.Fatalf("%s content contains unwanted %q:\n%s", language.ID, unwanted, content)
+			}
 		}
 	}
 }
@@ -88,6 +128,11 @@ func TestReadSolutionUsesProblemCodeSnippet(t *testing.T) {
 	}
 	if strings.Contains(javaContent, "Difficulty:") {
 		t.Fatalf("java snippet template should not include difficulty:\n%s", javaContent)
+	}
+	for _, unwanted := range []string{"ID: 1", "URL: https://leetcode.com/problems/two-sum/"} {
+		if strings.Contains(javaContent, unwanted) {
+			t.Fatalf("java snippet template contains unwanted %q:\n%s", unwanted, javaContent)
+		}
 	}
 
 	pythonContent, _, err := store.ReadSolution(problem, Language{ID: "python"})

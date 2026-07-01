@@ -69,6 +69,11 @@ type PaneLayoutStore interface {
 	SavePaneDeltas(deltas [3]int) error
 }
 
+type LanguagePreferenceStore interface {
+	PreferredLanguage(ctx context.Context) (string, error)
+	SetPreferredLanguage(ctx context.Context, languageID string) error
+}
+
 type testRunFinishedMsg struct {
 	problem catalog.Problem
 	mode    workspace.TestRunMode
@@ -197,6 +202,13 @@ func NewModel(c catalog.Catalog, store ProgressStore, opts ...Option) Model {
 	}
 	for _, opt := range opts {
 		opt(&model)
+	}
+	if languageStore, ok := store.(LanguagePreferenceStore); ok {
+		if languageID, err := languageStore.PreferredLanguage(context.Background()); err == nil {
+			if language, ok := workspace.LanguageByID(languageID); ok {
+				model.language = language
+			}
+		}
 	}
 	return model.resizeEditor()
 }
@@ -482,7 +494,7 @@ func (m Model) openSelectedEditor() (tea.Model, tea.Cmd) {
 	m.editorPath = path
 	m.editor.SetValue(content)
 	m.mode = ModeEditor
-	m.statusLine = "Editing " + path
+	m.statusLine = "Editing solution"
 	m = m.resizeEditor()
 	cmd := m.editor.Focus()
 	return m, cmd
@@ -504,11 +516,11 @@ func (m Model) saveEditor() Model {
 	}
 	m.editorPath = path
 	if formatStatus.changed {
-		m.statusLine = "Formatted and saved " + path
+		m.statusLine = "Formatted and saved"
 	} else if formatStatus.skipped {
-		m.statusLine = "Saved " + path + " (format skipped: " + formatStatus.reason + ")"
+		m.statusLine = "Saved (format skipped: " + formatStatus.reason + ")"
 	} else {
-		m.statusLine = "Saved " + path
+		m.statusLine = "Saved"
 	}
 	return m
 }
@@ -928,7 +940,12 @@ func editorScrollStep(m Model) int {
 
 func (m Model) cycleLanguage() Model {
 	m.language = workspace.NextLanguage(m.language)
-	m.statusLine = "Language: " + m.language.Title
+	m.statusLine = "Language changed"
+	if languageStore, ok := m.store.(LanguagePreferenceStore); ok {
+		if err := languageStore.SetPreferredLanguage(context.Background(), m.language.ID); err != nil {
+			m.statusLine += " (could not save preference: " + err.Error() + ")"
+		}
+	}
 	return m
 }
 
@@ -1011,7 +1028,7 @@ func (m Model) resizeActivePane(delta int) Model {
 	for i := range m.paneDeltas {
 		m.paneDeltas[i] = widths[i] - defaults[i]
 	}
-	m.statusLine = fmt.Sprintf("Pane widths: tracks %d, problems %d, details %d", widths[0], widths[1], widths[2])
+	m.statusLine = "Panes resized"
 	m = m.savePaneDeltas()
 	return m
 }
@@ -1290,7 +1307,7 @@ func (m Model) renderDetails(width, height int) string {
 	problem := m.SelectedProblem()
 	title := panelTitle("details", m.activePane == DetailsPane)
 	if problem.Slug == "" {
-		return renderPanel(width, height, strings.Join(append(panelLines(width, title), mutedStyle.Render("Select a problem to view details.")), "\n"))
+		return renderTightPanel(width, height, strings.Join(append(panelLines(width, title), mutedStyle.Render("Select a problem to view details.")), "\n"))
 	}
 	lines := m.detailLines(width)
 	bodyLimit := panelBodyLimit(height)
@@ -1300,19 +1317,37 @@ func (m Model) renderDetails(width, height int) string {
 	if maxScroll > 0 {
 		visible[0] = titleLine(title, mutedStyle.Render(fmt.Sprintf("%d/%d", scroll+1, maxScroll+1)), width)
 	}
-	return renderPanel(width, height, strings.Join(visible, "\n"))
+	return renderTightPanel(width, height, strings.Join(visible, "\n"))
 }
 
 func renderPanel(width, height int, content string) string {
-	return panelStyle.Width(width).Height(height).MaxHeight(height).Render(content)
+	return panelStyle.Width(width).Height(height).MaxHeight(height).Render(fitPanelContent(content, width, height))
 }
 
 func renderTightPanel(width, height int, content string) string {
-	return panelStyle.MarginRight(0).Width(width).Height(height).MaxHeight(height).Render(content)
+	return panelStyle.MarginRight(0).Width(width).Height(height).MaxHeight(height).Render(fitPanelContent(content, width, height))
+}
+
+func fitPanelContent(content string, width, height int) string {
+	innerWidth := panelInnerWidth(width)
+	innerHeight := max(1, height-2)
+	lines := strings.Split(content, "\n")
+	fitted := make([]string, 0, min(len(lines), innerHeight))
+	for _, line := range lines {
+		if len(fitted) == innerHeight {
+			break
+		}
+		fitted = append(fitted, truncateLine(line, innerWidth))
+	}
+	return strings.Join(fitted, "\n")
+}
+
+func panelInnerWidth(width int) int {
+	return max(1, width-4)
 }
 
 func titleLine(left, right string, width int) string {
-	available := max(1, width-4)
+	available := panelInnerWidth(width)
 	padding := max(1, available-ansi.StringWidth(left)-ansi.StringWidth(right))
 	return left + strings.Repeat(" ", padding) + right
 }
@@ -1322,7 +1357,7 @@ func panelLines(width int, title string) []string {
 }
 
 func panelSeparator(width int) string {
-	return mutedStyle.Render(strings.Repeat("─", max(1, width-4)))
+	return mutedStyle.Render(strings.Repeat("─", panelInnerWidth(width)))
 }
 
 func panelBodyLimit(height int) int {
@@ -1334,15 +1369,17 @@ func (m Model) detailLines(width int) []string {
 	if problem.Slug == "" {
 		return nil
 	}
+	innerWidth := panelInnerWidth(width)
+	linkPrefix := "External link: "
+	urlText := truncateLine(problem.URL, max(1, innerWidth-ansi.StringWidth(linkPrefix)))
 	lines := []string{
 		titleStyle.Render(problem.Title),
-		fmt.Sprintf("ID: %d", problem.ID),
 		fmt.Sprintf("Difficulty: %s", difficulty(problem.Difficulty)),
 		fmt.Sprintf("Status: %s", statusBadge(m.selectedStatus(problem))),
-		"URL: " + urlStyle.Hyperlink(problem.URL).Render(truncateLine(problem.URL, max(8, width-7))),
 		"",
 	}
 	lines = append(lines, m.renderStatementPreview(problem, width)...)
+	lines = append(lines, "", linkPrefix+urlStyle.Hyperlink(problem.URL).Render(urlText))
 	return lines
 }
 
@@ -1366,7 +1403,7 @@ func (m Model) renderStatementPreview(problem catalog.Problem, width int) []stri
 		return []string{titleStyle.Render("Statement:"), mutedStyle.Render("Could not read statement: " + err.Error())}
 	}
 	out := []string{titleStyle.Render("Statement:")}
-	for _, line := range previewLines(content, max(12, width-6), 0) {
+	for _, line := range previewLines(content, max(12, panelInnerWidth(width)), 0) {
 		out = append(out, line)
 	}
 	return out
@@ -1399,8 +1436,8 @@ func (m Model) renderBottom(width int) string {
 	if m.mode == ModeSearch {
 		left = m.search.View()
 	}
-	status := footerSeparatorStyle.Render(" | ") + footerLabelStyle.Render(m.statusLine)
-	return footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(left+status, max(1, width-2), ""))
+	status := footerSeparatorStyle.Render(" | ") + currentLanguageStyle.Render(m.language.Title) + footerSeparatorStyle.Render(" | ") + footerLabelStyle.Render(m.statusLine)
+	return footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(left+status, max(1, width), ""))
 }
 
 type footerCommand struct {
@@ -1441,16 +1478,16 @@ func (m Model) renderHelp(width int) string {
 		"enter           select current item",
 		"e               edit local solution",
 		"r               run saved solution tests",
-		"ctrl+w          switch editor pane",
-		"ctrl+r          run examples or selected testcase",
-		"ctrl+t          submit against all local tests",
-		"ctrl+y          use failed submit testcase",
+		"^w              switch editor pane",
+		"^r              run examples or selected testcase",
+		"^t              submit against all local tests",
+		"^y              use failed submit testcase",
 		"j/k             scroll focused editor pane",
-		"ctrl+u/d        page focused editor pane",
+		"^u/^d           page focused editor pane",
 		"tab             insert indentation while editing",
 		"enter           auto-indent while editing",
 		"l               cycle language",
-		"ctrl+s          format and save while editing",
+		"^s              format and save while editing",
 		"m               cycle progress status",
 		"o               open official URL",
 		"ctrl/cmd-click  open URL link in supported terminals",
@@ -1466,12 +1503,7 @@ func (m Model) renderEditor() string {
 	_, _, problemW, solutionW, bodyH := m.editorLayout(width, height)
 	solutionH, outputH, rightGap, _ := editorRightHeights(bodyH)
 
-	title := "LazyLeet  " + mutedStyle.Render("editor")
-	if m.editorProblem.Title != "" {
-		title += "  " + m.editorProblem.Title + "  " + mutedStyle.Render(m.language.Title)
-	}
-	header := headerStyle.Width(width).Render(title)
-	path := mutedStyle.Width(width).Render(m.editorPath)
+	header := headerStyle.Width(width).Render("LazyLeet  " + mutedStyle.Render("editor"))
 	problem := m.renderEditorProblem(problemW, bodyH)
 	solution := m.renderEditorSolution(solutionW, solutionH)
 	output := m.renderEditorOutput(solutionW, outputH)
@@ -1482,9 +1514,22 @@ func (m Model) renderEditor() string {
 	rightParts = append(rightParts, output)
 	right := lipgloss.JoinVertical(lipgloss.Left, rightParts...)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, problem, right)
-	footer := "ctrl+w pane  j/k scroll  ctrl+u/d page  ctrl+left/right resize  ctrl+r run  ctrl+t submit  ctrl+y use case  ctrl+s save  esc close  |  " + m.statusLine
-	bar := footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(footer, max(1, width-2), ""))
-	return lipgloss.JoinVertical(lipgloss.Left, header, path, body, "", bar)
+	bar := m.renderEditorBottom(width)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, "", bar)
+}
+
+func (m Model) renderEditorBottom(width int) string {
+	left := renderFooterCommands([]footerCommand{
+		{Key: "^w", Label: "pane"},
+		{Key: "j/k", Label: "scroll"},
+		{Key: "^←/^→", Label: "resize"},
+		{Key: "^r", Label: "run"},
+		{Key: "^t", Label: "submit"},
+		{Key: "^s", Label: "save"},
+		{Key: "esc", Label: "close"},
+	})
+	status := footerSeparatorStyle.Render(" | ") + footerLabelStyle.Render(m.statusLine)
+	return footerStyle.Width(width).MaxHeight(1).Render(ansi.Truncate(left+status, max(1, width), ""))
 }
 
 func (m Model) resizeEditor() Model {
@@ -1508,7 +1553,7 @@ func (m Model) editorLayout(width, height int) (available, gap, problemW, soluti
 		problemW = 32
 		solutionW = available - problemW
 	}
-	bodyH = max(8, height-4)
+	bodyH = max(8, height-3)
 	return available, gap, problemW, solutionW, bodyH
 }
 
@@ -1518,7 +1563,7 @@ func (m Model) editorBodyHeight(height int) int {
 }
 
 func editorRightHeights(bodyH int) (solutionH, outputH, gap, total int) {
-	gap = 1
+	gap = 0
 	outputH = clamp((bodyH*40)/100, 7, max(7, bodyH-7))
 	solutionH = max(6, bodyH-outputH-gap)
 	total = solutionH + gap + outputH
@@ -1598,7 +1643,7 @@ func (m Model) editorOutputLines(width int) []string {
 		return []string{mutedStyle.Render("Running examples...")}
 	}
 	if !m.hasLastRun {
-		return []string{mutedStyle.Render("Run examples with ctrl+r. Submit all local tests with ctrl+t.")}
+		return []string{mutedStyle.Render("Run examples with ^r. Submit all local tests with ^t.")}
 	}
 	if m.lastRunErr != "" {
 		return append([]string{hardStyle.Render("Run error")}, previewLines(m.lastRunErr, wrapWidth, 0)...)
@@ -1626,7 +1671,7 @@ func (m Model) editorOutputLines(width int) []string {
 		)
 		lines = append(lines, previewLines(failure.Expected, wrapWidth, 0)...)
 		if m.lastRunMode == workspace.TestRunAll && len(failure.Case.Input) > 0 {
-			lines = append(lines, "", mutedStyle.Render("ctrl+y use this testcase for Run"))
+			lines = append(lines, "", mutedStyle.Render("^y use this testcase for Run"))
 		}
 	}
 	if output := visibleRunnerOutput(result.Output); output != "" {

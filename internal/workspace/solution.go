@@ -30,6 +30,15 @@ func SupportedLanguages() []Language {
 	return append([]Language(nil), supportedLanguages...)
 }
 
+func LanguageByID(id string) (Language, bool) {
+	for _, language := range supportedLanguages {
+		if language.ID == id {
+			return language, true
+		}
+	}
+	return Language{}, false
+}
+
 func NextLanguage(current Language) Language {
 	languages := SupportedLanguages()
 	for i, language := range languages {
@@ -53,7 +62,7 @@ func (s Store) ReadSolution(problem catalog.Problem, language Language) (content
 	path = s.SolutionPath(problem, language)
 	data, err := os.ReadFile(path)
 	if err == nil {
-		return string(data), path, nil
+		return sanitizeSolutionMetadata(string(data)), path, nil
 	}
 	if os.IsNotExist(err) {
 		return solutionTemplate(problem, language), path, nil
@@ -111,7 +120,7 @@ func normalizeLanguage(language Language) Language {
 func solutionTemplate(problem catalog.Problem, language Language) string {
 	tags := solutionTags(problem)
 	sort.Strings(tags)
-	metadata := fmt.Sprintf("Problem: %s\nID: %d\nURL: %s\nTags: %s", problem.Title, problem.ID, problem.URL, strings.Join(tags, ", "))
+	metadata := fmt.Sprintf("Problem: %s\nTags: %s", problem.Title, strings.Join(tags, ", "))
 	if snippet, ok := problemSnippet(problem, language); ok {
 		return fmt.Sprintf("%s\n\n%s\n", languageCommentBlock(metadata, language), snippet)
 	}
@@ -149,6 +158,29 @@ class Solution:
     pass
 `, metadata)
 	}
+}
+
+func sanitizeSolutionMetadata(content string) string {
+	lines := strings.Split(content, "\n")
+	searchLimit := len(lines)
+	if searchLimit > 30 {
+		searchLimit = 30
+	}
+	out := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if i < searchLimit && isLegacySolutionMetadataLine(line) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+func isLegacySolutionMetadataLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "//"))
+	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+	return strings.HasPrefix(trimmed, "ID:") || strings.HasPrefix(trimmed, "URL:")
 }
 
 func problemWorkspaceDir(problem catalog.Problem) string {

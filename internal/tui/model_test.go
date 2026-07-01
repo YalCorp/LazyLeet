@@ -18,7 +18,8 @@ import (
 )
 
 type fakeStore struct {
-	statuses map[string]storage.Status
+	statuses            map[string]storage.Status
+	preferredLanguageID string
 }
 
 type fakeSolutions struct {
@@ -57,6 +58,15 @@ func (f *fakeStore) SetProgress(_ context.Context, slug string, status storage.S
 		f.statuses = map[string]storage.Status{}
 	}
 	f.statuses[slug] = status
+	return nil
+}
+
+func (f *fakeStore) PreferredLanguage(_ context.Context) (string, error) {
+	return f.preferredLanguageID, nil
+}
+
+func (f *fakeStore) SetPreferredLanguage(_ context.Context, languageID string) error {
+	f.preferredLanguageID = languageID
 	return nil
 }
 
@@ -197,6 +207,9 @@ func TestEditSolutionSavesContent(t *testing.T) {
 	}
 	if editor.statusLine == "" {
 		t.Fatal("save did not update status line")
+	}
+	if strings.Contains(editor.statusLine, "/") || strings.Contains(editor.statusLine, ".py") {
+		t.Fatalf("save status should not include path: %q", editor.statusLine)
 	}
 }
 
@@ -398,6 +411,11 @@ func TestEditorRendersProblemStatementBesideSolution(t *testing.T) {
 			t.Fatalf("editor view missing %q:\n%s", want, view)
 		}
 	}
+	for _, unwanted := range []string{"solution.py", "/workspace/two-sum", "Python"} {
+		if strings.Contains(ansi.Strip(view), unwanted) {
+			t.Fatalf("editor view contains unwanted %q:\n%s", unwanted, view)
+		}
+	}
 }
 
 func TestEditorRenderKeepsFooterInsideTerminalHeight(t *testing.T) {
@@ -415,8 +433,24 @@ func TestEditorRenderKeepsFooterInsideTerminalHeight(t *testing.T) {
 	if got := lipgloss.Height(view); got > editor.height {
 		t.Fatalf("editor height = %d, want <= %d:\n%s", got, editor.height, view)
 	}
-	if !strings.Contains(ansi.Strip(view), "ctrl+w pane") {
+	text := ansi.Strip(view)
+	if !strings.Contains(text, "^w pane") {
 		t.Fatalf("editor footer is missing:\n%s", view)
+	}
+	for _, unwanted := range []string{"ctrl+w", "ctrl+r", "ctrl+t", "ctrl+s", "ctrl+u/d", "ctrl+y", "Editing /"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("editor footer contains clutter %q:\n%s", unwanted, view)
+		}
+	}
+}
+
+func TestEditorRightColumnHasNoGapBetweenSolutionAndOutput(t *testing.T) {
+	solutionH, outputH, gap, total := editorRightHeights(20)
+	if gap != 0 {
+		t.Fatalf("editor right column gap = %d, want 0", gap)
+	}
+	if total != solutionH+outputH {
+		t.Fatalf("editor right column total = %d, want solution + output %d", total, solutionH+outputH)
 	}
 }
 
@@ -738,19 +772,31 @@ func TestEditSolutionHandlesStoreError(t *testing.T) {
 }
 
 func TestLanguageCyclesAndControlsSolutionFile(t *testing.T) {
+	store := &fakeStore{}
 	solutions := &fakeSolutions{}
-	model := newTestModel(t, WithSolutionStore(solutions))
+	model := newTestModelWithStore(t, store, WithSolutionStore(solutions))
 
 	updated, _ := model.Update(key("l"))
 	model = updated.(Model)
 	if model.language.ID != "go" {
 		t.Fatalf("language after cycle = %s, want go", model.language.ID)
 	}
+	if store.preferredLanguageID != "go" {
+		t.Fatalf("stored language = %q, want go", store.preferredLanguageID)
+	}
 
 	updated, _ = model.Update(key("e"))
 	editor := updated.(Model)
 	if !strings.HasSuffix(editor.editorPath, "solution.go") {
 		t.Fatalf("editor path = %q, want Go solution file", editor.editorPath)
+	}
+}
+
+func TestModelLoadsPreferredLanguage(t *testing.T) {
+	store := &fakeStore{preferredLanguageID: "java"}
+	model := newTestModelWithStore(t, store)
+	if model.language.ID != "java" {
+		t.Fatalf("language = %s, want java", model.language.ID)
 	}
 }
 
@@ -761,17 +807,21 @@ func TestDetailsRenderLocalStatementPreview(t *testing.T) {
 	model := newTestModel(t, WithStatementStore(solutions))
 
 	view := model.renderDetails(80, 28)
-	for _, want := range []string{"Statement:", "Given an array of integers"} {
+	text := ansi.Strip(view)
+	for _, want := range []string{"Difficulty:", "Status:", "Statement:", "Given an array of integers", "External link:"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("details missing %q:\n%s", want, view)
 		}
 	}
-	for _, unwanted := range []string{"statement.md", "Patterns:", "Language:"} {
-		if strings.Contains(view, unwanted) {
+	if strings.Index(text, "External link:") < strings.Index(text, "Given an array of integers") {
+		t.Fatalf("external link should render after statement:\n%s", view)
+	}
+	for _, unwanted := range []string{"ID:", "URL:", "statement.md", "Patterns:", "Language:"} {
+		if strings.Contains(text, unwanted) {
 			t.Fatalf("details contains unwanted %q:\n%s", unwanted, view)
 		}
 	}
-	if strings.Contains(ansi.Strip(view), "  Given an array") {
+	if strings.Contains(text, "  Given an array") {
 		t.Fatalf("statement line is indented in details:\n%s", view)
 	}
 }
@@ -799,7 +849,7 @@ func TestDetailsPaneScrollsStatement(t *testing.T) {
 	}
 
 	updated := tea.Model(model)
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 5; i++ {
 		updated, _ = updated.(Model).Update(key("j"))
 	}
 	scrolled := updated.(Model)
@@ -921,6 +971,48 @@ func TestPanesRenderTitleSeparators(t *testing.T) {
 	}
 }
 
+func TestDetailsPaneDoesNotRenderRightMargin(t *testing.T) {
+	model := newTestModel(t)
+	details := model.renderDetails(50, 8)
+	for _, line := range strings.Split(ansi.Strip(details), "\n") {
+		if strings.HasSuffix(line, " ") {
+			t.Fatalf("details pane line has trailing margin: %q\n%s", line, details)
+		}
+	}
+}
+
+func TestPanesConstrainLongContentToBounds(t *testing.T) {
+	solutions := &fakeSolutions{statements: map[string]string{
+		"find-if-path-exists-in-graph": strings.Repeat("verylongstatementtoken", 12),
+	}}
+	model := newTestModel(t, WithStatementStore(solutions))
+	problem := model.SelectedProblem()
+	problem.Title = strings.Repeat("Very Long Problem Title ", 8)
+	problem.URL = "https://leetcode.com/problems/" + strings.Repeat("very-long-url-segment-", 12)
+	model.catalog.Problems[problem.Slug] = problem
+
+	problemsWidth, detailsWidth, height := 34, 38, 10
+	problems := model.renderProblems(problemsWidth, height)
+	details := model.renderDetails(detailsWidth, height)
+
+	if got := lipgloss.Height(problems); got != height {
+		t.Fatalf("problems height = %d, want %d:\n%s", got, height, problems)
+	}
+	if got := lipgloss.Height(details); got != height {
+		t.Fatalf("details height = %d, want %d:\n%s", got, height, details)
+	}
+	for _, line := range strings.Split(ansi.Strip(problems), "\n") {
+		if got := ansi.StringWidth(line); got > problemsWidth+1 {
+			t.Fatalf("problems line width = %d, want <= %d: %q\n%s", got, problemsWidth+1, line, problems)
+		}
+	}
+	for _, line := range strings.Split(ansi.Strip(details), "\n") {
+		if got := ansi.StringWidth(line); got > detailsWidth {
+			t.Fatalf("details line width = %d, want <= %d: %q\n%s", got, detailsWidth, line, details)
+		}
+	}
+}
+
 func TestResizeActivePaneChangesWidths(t *testing.T) {
 	model := newTestModel(t)
 	model.width = 120
@@ -986,7 +1078,12 @@ func TestFooterHighlightsCommandKeys(t *testing.T) {
 			t.Fatalf("footer missing %q:\n%s", want, footer)
 		}
 	}
-	for _, unwanted := range []string{"move selection", "scroll details"} {
+	for _, want := range []string{"Python", "Ready"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("footer missing %q:\n%s", want, footer)
+		}
+	}
+	for _, unwanted := range []string{"Language:", "Using Python", "move selection", "scroll details"} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("footer contains stale label %q:\n%s", unwanted, footer)
 		}
@@ -1023,11 +1120,16 @@ func TestOpenURLReturnsCommand(t *testing.T) {
 
 func newTestModel(t *testing.T, opts ...Option) Model {
 	t.Helper()
+	return newTestModelWithStore(t, &fakeStore{}, opts...)
+}
+
+func newTestModelWithStore(t *testing.T, store *fakeStore, opts ...Option) Model {
+	t.Helper()
 	c, err := catalog.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewModel(c, &fakeStore{}, opts...)
+	return NewModel(c, store, opts...)
 }
 
 func key(s string) tea.KeyPressMsg {
