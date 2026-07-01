@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/YalCorp/LazyLeet/internal/catalog"
 )
@@ -290,5 +291,51 @@ func TestRunJavaTestCasesProvidesLeetcodeImports(t *testing.T) {
 	}
 	if result.Passed != 2 || result.Total != 2 {
 		t.Fatalf("result = %#v, want 2/2", result)
+	}
+}
+
+func TestRunJavaTestCasesReportsTLE(t *testing.T) {
+	oldRunTimeout := javaRunTimeout
+	javaRunTimeout = 100 * time.Millisecond
+	defer func() {
+		javaRunTimeout = oldRunTimeout
+	}()
+
+	problem := catalog.Problem{
+		Slug: "non-terminating-solution",
+		Method: catalog.Method{
+			Name:       "answer",
+			ReturnType: "integer",
+			Params: []catalog.MethodParam{
+				{Name: "n", Type: "integer"},
+			},
+		},
+	}
+	cases := []TestCase{{
+		Input: map[string]json.RawMessage{
+			"n": json.RawMessage(`1`),
+		},
+		Expected: json.RawMessage(`1`),
+		Comment:  "hangs",
+	}}
+	solution := `class Solution {
+    public int answer(int n) {
+        while (true) {
+        }
+    }
+}`
+
+	result, err := runJavaTestCases(problem, solution, cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, result = %#v", result)
+	}
+	if result.TimeLimit != javaRunTimeout {
+		t.Fatalf("TimeLimit = %s, want %s", result.TimeLimit, javaRunTimeout)
+	}
+	if result.Total != 1 {
+		t.Fatalf("Total = %d, want 1", result.Total)
 	}
 }

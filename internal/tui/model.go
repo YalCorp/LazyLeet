@@ -596,6 +596,9 @@ func testRunStatus(msg testRunFinishedMsg) string {
 	if msg.err != nil {
 		return label + " error: " + msg.err.Error()
 	}
+	if msg.result.TimedOut {
+		return fmt.Sprintf("%s TLE: time limit exceeded after %s", label, msg.result.TimeLimit)
+	}
 	if msg.result.Total == 0 {
 		return "No tests ran for " + msg.problem.Title
 	}
@@ -1653,7 +1656,15 @@ func (m Model) editorOutputLines(width int) []string {
 	if m.debugCase != nil && m.debugCaseProblem == m.editorProblem.Slug && m.lastRunMode == workspace.TestRunCustom {
 		lines = append(lines, mutedStyle.Render("Selected testcase"))
 	}
-	if result.Total > 0 && result.Passed == result.Total {
+	if result.TimedOut {
+		lines = append(lines, hardStyle.Render("Time Limit Exceeded"))
+		if result.TimeLimit > 0 {
+			lines = append(lines, "Time limit: "+result.TimeLimit.String())
+		}
+		if result.Passed > 0 || result.Total > 0 {
+			lines = append(lines, fmt.Sprintf("Progress before timeout: %d/%d passed", result.Passed, result.Total))
+		}
+	} else if result.Total > 0 && result.Passed == result.Total {
 		lines = append(lines, fmt.Sprintf("Result: %d/%d passed", result.Passed, result.Total), easyStyle.Render("Accepted"))
 	} else if len(result.Failures) > 0 {
 		failure := result.Failures[0]

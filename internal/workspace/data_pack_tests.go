@@ -39,11 +39,13 @@ type TestRunRequest struct {
 }
 
 type TestRunResult struct {
-	Passed   int
-	Total    int
-	Mode     TestRunMode
-	Failures []TestFailure
-	Output   string
+	Passed    int
+	Total     int
+	Mode      TestRunMode
+	Failures  []TestFailure
+	Output    string
+	TimedOut  bool
+	TimeLimit time.Duration
 }
 
 type TestFailure struct {
@@ -247,16 +249,24 @@ func runJavaTestCases(problem catalog.Problem, solution string, cases []TestCase
 		return TestRunResult{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), javaCompileTimeout)
 	defer cancel()
 	compile := exec.CommandContext(ctx, "javac", "Solution.java", "Main.java")
 	compile.Dir = dir
 	compileOut, err := compile.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return TestRunResult{
+				Total:     len(cases),
+				Output:    strings.TrimSpace(string(compileOut)),
+				TimedOut:  true,
+				TimeLimit: javaCompileTimeout,
+			}, nil
+		}
 		return TestRunResult{}, commandOutputError("javac failed", err, compileOut)
 	}
 
-	runCtx, runCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	runCtx, runCancel := context.WithTimeout(context.Background(), javaRunTimeout)
 	defer runCancel()
 	run := exec.CommandContext(runCtx, "java", "-cp", dir, "Main")
 	run.Dir = dir
@@ -269,6 +279,11 @@ func runJavaTestCases(problem catalog.Problem, solution string, cases []TestCase
 		}
 	}
 	result.Output = strings.TrimSpace(string(output))
+	if runCtx.Err() == context.DeadlineExceeded {
+		result.TimedOut = true
+		result.TimeLimit = javaRunTimeout
+		return result, nil
+	}
 	if err != nil {
 		if result.Total > 0 {
 			return result, nil
@@ -277,6 +292,11 @@ func runJavaTestCases(problem catalog.Problem, solution string, cases []TestCase
 	}
 	return result, nil
 }
+
+var (
+	javaCompileTimeout = 10 * time.Second
+	javaRunTimeout     = 10 * time.Second
+)
 
 func javaSolutionSource(solution string) string {
 	trimmed := strings.TrimLeft(solution, "\ufeff \t\r\n")

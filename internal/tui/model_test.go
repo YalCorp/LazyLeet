@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -478,6 +479,40 @@ func TestEditorOutputPanelShowsRunError(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("editor output missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestEditorOutputPanelShowsTLE(t *testing.T) {
+	solutions := &fakeSolutions{
+		contents:   map[string]string{"two-sum:python": "class Solution:\n    pass"},
+		statements: map[string]string{"two-sum": "Given nums and target"},
+	}
+	tests := fakeTestCaseStore{result: workspace.TestRunResult{
+		Total:     1,
+		TimedOut:  true,
+		TimeLimit: 10 * time.Second,
+	}}
+	model := newTestModel(t, WithSolutionStore(solutions), WithStatementStore(solutions), WithTestCaseStore(&tests))
+	updated, _ := model.Update(key("e"))
+	editor := updated.(Model)
+
+	updated, cmd := editor.Update(keyCtrl('r'))
+	editor = updated.(Model)
+	if cmd == nil {
+		t.Fatal("ctrl+r did not start test command")
+	}
+	msg := cmd().(testRunFinishedMsg)
+	updated, _ = editor.Update(msg)
+	editor = updated.(Model)
+	view := strings.Join(editor.editorOutputLines(80), "\n")
+
+	for _, want := range []string{"Time Limit Exceeded", "Time limit: 10s", "Progress before timeout: 0/1 passed"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("editor output missing %q:\n%s", want, view)
+		}
+	}
+	if !strings.Contains(editor.statusLine, "Run TLE: time limit exceeded after 10s") {
+		t.Fatalf("statusLine = %q", editor.statusLine)
 	}
 }
 
